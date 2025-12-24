@@ -1,0 +1,51 @@
+# 二进制文件
+anti2api
+anti2api.exe
+*.exe
+*.dll
+*.so
+*.dylib
+
+# 测试文件
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# 依赖目录
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 环境配置
+.env
+.env.local
+.env.*.local
+
+# 数据目录（保留结构）
+data/*
+!data/.gitkeep
+
+# 日志
+*.log
+logs/
+
+# 临时文件
+tmp/
+temp/
+
+# 数据库
+*.db
+
+# Claude
+.claude/
+README.md

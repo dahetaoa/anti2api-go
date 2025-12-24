@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  anti2api:
+    build: .
+    container_name: anti2api-golang
+    ports:
+      - "8045:8045"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=8045
+      - HOST=0.0.0.0
+      - PANEL_USER=${PANEL_USER:-admin}
+      - PANEL_PASSWORD=${PANEL_PASSWORD:?PANEL_PASSWORD is required}
+      - API_KEY=${API_KEY:-}
+      - DEBUG=${DEBUG:-off}
+      - ENDPOINT_MODE=${ENDPOINT_MODE:-daily}
+      - TIMEOUT=${TIMEOUT:-180000}
+      - RETRY_MAX_ATTEMPTS=${RETRY_MAX_ATTEMPTS:-3}
+      - RETRY_STATUS_CODES=${RETRY_STATUS_CODES:-429,500}
+      # 可选代理配置
+      # - PROXY=http://host.docker.internal:7890
+      # 可选自定义 OAuth
+      # - GOOGLE_CLIENT_ID=
+      # - GOOGLE_CLIENT_SECRET=
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8045/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
