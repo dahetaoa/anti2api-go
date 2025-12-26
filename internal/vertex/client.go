@@ -100,7 +100,7 @@ func (c *Client) SendRequest(ctx context.Context, req *core.AntigravityRequest, 
 		return nil, err
 	}
 
-	logger.BackendRequest("POST", reqURL, req)
+	logger.BackendRequest("POST", reqURL, body)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
 	if err != nil {
@@ -164,7 +164,7 @@ func (c *Client) SendStreamRequest(ctx context.Context, req *core.AntigravityReq
 		return nil, err
 	}
 
-	logger.BackendRequest("POST", reqURL, req)
+	logger.BackendRequest("POST", reqURL, body)
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
 	if err != nil {

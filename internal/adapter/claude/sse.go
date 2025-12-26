@@ -49,6 +49,8 @@ type SSEEmitter struct {
 	totalOutputTokens  int
 	hasToolCalls       bool // 记录是否遇到过工具调用
 	mu                 sync.Mutex
+	// 用于收集原始 JSON 以便日志记录（透传）
+	collectedEvents []map[string]interface{}
 }
 
 // NewSSEEmitter 创建 Claude SSE 发射器
@@ -70,6 +72,7 @@ func NewSSEEmitter(w http.ResponseWriter, requestID string, model string, inputT
 		thinkingBlockIndex: nil,
 		finished:           false,
 		totalOutputTokens:  0,
+		collectedEvents:    nil,
 	}
 }
 
@@ -143,12 +146,19 @@ func (e *SSEEmitter) ProcessPart(part StreamDataPart) error {
 	return nil
 }
 
-// writeSSE 写入 SSE 事件
+// writeSSE 写入 SSE 事件并收集原始 JSON
 func (e *SSEEmitter) writeSSE(event string, data interface{}) error {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
+
+	// 收集原始 JSON 用于日志透传
+	var eventData map[string]interface{}
+	if err := json.Unmarshal(jsonData, &eventData); err == nil {
+		e.collectedEvents = append(e.collectedEvents, eventData)
+	}
+
 	_, err = fmt.Fprintf(e.w, "event: %s\ndata: %s\n\n", event, string(jsonData))
 	if err != nil {
 		return err
@@ -413,6 +423,19 @@ func (e *SSEEmitter) Finish(usage *Usage) error {
 	return e.writeSSE("message_stop", ClaudeSSEMessageStop{
 		Type: "message_stop",
 	})
+}
+
+// GetMergedResponse 返回收集的原始 SSE 事件（用于透传日志记录）
+func (e *SSEEmitter) GetMergedResponse() []interface{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// 转换为 []interface{} 用于日志输出
+	result := make([]interface{}, len(e.collectedEvents))
+	for i, event := range e.collectedEvents {
+		result[i] = event
+	}
+	return result
 }
 
 // SetSSEHeaders 设置 Claude SSE 响应头

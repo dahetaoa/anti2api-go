@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -58,14 +59,22 @@ func HandleGetModels(w http.ResponseWriter, r *http.Request) {
 
 // HandleChatCompletions 处理聊天完成请求
 func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	var req openai.OpenAIChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, http.StatusBadRequest, "Invalid request: "+err.Error())
+	// 读取原始请求体
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "Failed to read request body")
 		return
 	}
 
-	// 记录客户端请求
-	logger.ClientRequest(r.Method, r.URL.Path, req)
+	// 记录原始客户端请求
+	logger.ClientRequest(r.Method, r.URL.Path, rawBody)
+
+	// 反序列化用于业务逻辑
+	var req openai.OpenAIChatRequest
+	if err := json.Unmarshal(rawBody, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, "Invalid request: "+err.Error())
+		return
+	}
 
 	// 获取 token
 	token, err := store.GetAccountStore().GetToken()
@@ -86,17 +95,25 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 func HandleChatCompletionsWithCredential(w http.ResponseWriter, r *http.Request) {
 	credential := r.PathValue("credential")
 
+	// 读取原始请求体
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "Failed to read request body")
+		return
+	}
+
+	// 记录原始客户端请求
+	logger.ClientRequest(r.Method, r.URL.Path, rawBody)
+
+	// 反序列化用于业务逻辑
 	var req openai.OpenAIChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(rawBody, &req); err != nil {
 		WriteError(w, http.StatusBadRequest, "Invalid request: "+err.Error())
 		return
 	}
 
-	logger.ClientRequest(r.Method, r.URL.Path, req)
-
 	// 按凭证获取 token
 	var token *store.Account
-	var err error
 
 	accountStore := store.GetAccountStore()
 	if strings.Contains(credential, "@") {
@@ -185,19 +202,12 @@ func handleStreamRequest(w http.ResponseWriter, r *http.Request, req *openai.Ope
 
 	streamWriter := openai.NewSSEWriter(w, id, created, model)
 
-	var usage *core.UsageMetadata
-	var contentBuilder strings.Builder
-
 	// 处理流式响应
 	// 绑定 StreamWriter.ProcessData 作为回调
-	usage, err = vertex.ParseStream(resp, func(data *vertex.StreamData) error {
-		// 记录内容用于日志
+	streamResult, err := vertex.ParseStreamWithResult(resp, func(data *vertex.StreamData) error {
+		// 处理每个 part
 		if len(data.Response.Candidates) > 0 {
 			for _, part := range data.Response.Candidates[0].Content.Parts {
-				if part.Text != "" {
-					contentBuilder.WriteString(part.Text)
-				}
-				// 处理每个 part
 				if err := streamWriter.ProcessPart(openai.StreamDataPart{
 					Text:             part.Text,
 					FunctionCall:     part.FunctionCall,
@@ -217,40 +227,33 @@ func handleStreamRequest(w http.ResponseWriter, r *http.Request, req *openai.Ope
 
 	duration := time.Since(startTime)
 
+	// 记录后端流式响应日志（原始 Vertex 格式，仅合并 text）
+	logger.BackendStreamResponse(http.StatusOK, duration, streamResult.MergedResponse)
+
 	if err != nil {
 		logger.Error("Stream processing error: %v", err)
 		// 记录失败日志
-		recordLog(r.Method, r.URL.Path, req, token, http.StatusInternalServerError, false, duration, err.Error(), contentBuilder.String())
+		recordLog(r.Method, r.URL.Path, req, token, http.StatusInternalServerError, false, duration, err.Error(), streamResult.Text)
 	} else {
 		// 记录成功日志
-		recordLog(r.Method, r.URL.Path, req, token, http.StatusOK, true, duration, "", contentBuilder.String())
+		recordLog(r.Method, r.URL.Path, req, token, http.StatusOK, true, duration, "", streamResult.Text)
 	}
 
 	// 发送结束
 	finishReason := "stop"
-	// 检查 tool calls 状态（注意：ProcessData 处理完流后不需要从 writer 获取 toolCalls，
-	// 因为 OpenAI 格式是在流中增量发送的，结束时 tool_calls 状态由 finishReason 决定，
-	// 但这里我们简单默认为 stop，因为 vertex 不会显式告诉我们 finish reason 是 tool_calls
-	// 除非我们解析了 finishReason 字段。StreamData 里有 finishReason）
-
-	// 这里可以优化：从 ParseStream 返回的最后状态中获取 finishReason，
-	// 或者在回调中捕获。StreamWriter 内部处理了大部分转换，但 finish reason 需要显式传递。
-
-	// 简单起见，如果 usage 存在且有 tool calls (逻辑上)，或者可以从外部推断
-	// 但当前架构下，Vertex 的 finishReason 会在 StreamData 中。
-	// 我们在 ProcessData 中已经处理了 finishReason -> tool_calls 的转换逻辑（如果需要）。
-	// 不过 WriteFinish 需要明确的 reason。
-
-	// 修正：我们可以在 WriteFinish 中传入 stop。
-	// 如果 Vertex 返回了 specific finish reason，StreamWriter 暂时没有暴露出来。
-	// 但这对流式客户端影响不大，通常客户端根据 content 或 tool_calls 判断。
+	if streamResult.FinishReason != "" {
+		finishReason = streamResult.FinishReason
+	}
 
 	var usageData *openai.Usage
-	if usage != nil {
-		usageData = openai.ConvertUsage(usage)
+	if streamResult.Usage != nil {
+		usageData = openai.ConvertUsage(streamResult.Usage)
 	}
 
 	streamWriter.WriteFinish(finishReason, usageData)
+
+	// 记录客户端流式响应日志（透传原始 SSE 事件）
+	logger.ClientStreamResponse(http.StatusOK, duration, streamWriter.GetMergedResponse())
 }
 
 func handleBypassStream(w http.ResponseWriter, r *http.Request, req *openai.OpenAIChatRequest, token *store.Account) {

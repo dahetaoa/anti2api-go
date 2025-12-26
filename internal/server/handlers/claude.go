@@ -2,8 +2,8 @@ package handlers
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"anti2api-golang/internal/adapter/claude"
@@ -15,14 +15,22 @@ import (
 
 // HandleClaudeMessages 处理 Claude /v1/messages 端点
 func HandleClaudeMessages(w http.ResponseWriter, r *http.Request) {
-	var req claude.ClaudeMessagesRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteClaudeError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request: "+err.Error())
+	// 读取原始请求体
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		WriteClaudeError(w, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return
 	}
 
-	// 记录客户端请求
-	logger.ClientRequest(r.Method, r.URL.Path, req)
+	// 记录原始客户端请求
+	logger.ClientRequest(r.Method, r.URL.Path, rawBody)
+
+	// 反序列化用于业务逻辑
+	var req claude.ClaudeMessagesRequest
+	if err := json.Unmarshal(rawBody, &req); err != nil {
+		WriteClaudeError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request: "+err.Error())
+		return
+	}
 
 	// 获取 token
 	token, err := store.GetAccountStore().GetToken()
@@ -41,13 +49,22 @@ func HandleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 
 // HandleClaudeCountTokens 处理 Claude /v1/messages/count_tokens 端点
 func HandleClaudeCountTokens(w http.ResponseWriter, r *http.Request) {
-	var req claude.ClaudeMessagesRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteClaudeError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request: "+err.Error())
+	// 读取原始请求体
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		WriteClaudeError(w, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return
 	}
 
-	logger.ClientRequest(r.Method, r.URL.Path, req)
+	// 记录原始客户端请求
+	logger.ClientRequest(r.Method, r.URL.Path, rawBody)
+
+	// 反序列化用于业务逻辑
+	var req claude.ClaudeMessagesRequest
+	if err := json.Unmarshal(rawBody, &req); err != nil {
+		WriteClaudeError(w, http.StatusBadRequest, "invalid_request_error", "Invalid request: "+err.Error())
+		return
+	}
 
 	result, err := claude.CountClaudeTokens(&req)
 	if err != nil {
@@ -136,18 +153,12 @@ func handleClaudeStreamRequest(w http.ResponseWriter, r *http.Request, req *clau
 	emitter := claude.NewSSEEmitter(w, requestID, req.Model, inputTokens)
 	emitter.Start()
 
-	var contentBuilder strings.Builder
-
 	// 处理流式响应
 	// 绑定 ClaudeSSEEmitter.ProcessData
-	usage, err := vertex.ParseStream(resp, func(data *vertex.StreamData) error {
-		// 记录内容用于日志
+	streamResult, err := vertex.ParseStreamWithResult(resp, func(data *vertex.StreamData) error {
+		// 处理每个 part
 		if len(data.Response.Candidates) > 0 {
 			for _, part := range data.Response.Candidates[0].Content.Parts {
-				if part.Text != "" {
-					contentBuilder.WriteString(part.Text)
-				}
-				// 处理每个 part
 				if err := emitter.ProcessPart(claude.StreamDataPart{
 					Text:             part.Text,
 					FunctionCall:     part.FunctionCall,
@@ -163,20 +174,26 @@ func handleClaudeStreamRequest(w http.ResponseWriter, r *http.Request, req *clau
 
 	duration := time.Since(startTime)
 
+	// 记录后端流式响应日志（原始 Vertex 格式，仅合并 text）
+	logger.BackendStreamResponse(http.StatusOK, duration, streamResult.MergedResponse)
+
 	if err != nil {
 		logger.Error("Claude stream processing error: %v", err)
-		recordClaudeLog(r, req, token, http.StatusInternalServerError, false, duration, err.Error(), contentBuilder.String())
+		recordClaudeLog(r, req, token, http.StatusInternalServerError, false, duration, err.Error(), streamResult.Text)
 	} else {
-		recordClaudeLog(r, req, token, http.StatusOK, true, duration, "", contentBuilder.String())
+		recordClaudeLog(r, req, token, http.StatusOK, true, duration, "", streamResult.Text)
 	}
 
 	// 发送结束事件
 	var usageData *claude.Usage
-	if usage != nil {
-		usageData = claude.ConvertUsage(usage)
+	if streamResult.Usage != nil {
+		usageData = claude.ConvertUsage(streamResult.Usage)
 	}
 	// Finish 会自动从 Emitter 内部状态判断 stopReason
 	emitter.Finish(usageData)
+
+	// 记录客户端流式响应日志（透传原始 SSE 事件）
+	logger.ClientStreamResponse(http.StatusOK, duration, emitter.GetMergedResponse())
 }
 
 // recordClaudeLog 记录 Claude API 日志

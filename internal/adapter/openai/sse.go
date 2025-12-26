@@ -48,6 +48,8 @@ type SSEWriter struct {
 	reasoningBuffer []byte              // 缓冲不完整的 UTF-8 思考字节
 	toolCalls       []core.ToolCallInfo // 累积工具调用
 	mu              sync.Mutex          // 保护并发写入
+	// 用于收集原始 JSON 以便日志记录（透传）
+	collectedEvents []map[string]interface{}
 }
 
 // NewSSEWriter 创建流式写入器
@@ -166,7 +168,30 @@ func (sw *SSEWriter) writeRoleLocked() error {
 		&Delta{Role: "assistant"},
 		nil, nil,
 	)
-	return WriteSSEData(sw.w, chunk)
+	return sw.writeSSEDataAndCollect(chunk)
+}
+
+// writeSSEDataAndCollect 写入 SSE 数据并收集原始 JSON
+func (sw *SSEWriter) writeSSEDataAndCollect(data interface{}) error {
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+
+	// 收集原始 JSON 用于日志透传
+	var eventData map[string]interface{}
+	if err := json.Unmarshal(jsonBytes, &eventData); err == nil {
+		sw.collectedEvents = append(sw.collectedEvents, eventData)
+	}
+
+	_, err = fmt.Fprintf(sw.w, "data: %s\n\n", jsonBytes)
+	if err != nil {
+		return err
+	}
+	if f, ok := sw.w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return nil
 }
 
 // WriteRole 写入角色（首次，线程安全）
@@ -251,7 +276,7 @@ func (sw *SSEWriter) writeContentLocked(content string) error {
 		&Delta{Content: validContent},
 		nil, nil,
 	)
-	return WriteSSEData(sw.w, chunk)
+	return sw.writeSSEDataAndCollect(chunk)
 }
 
 // WriteContent 写入内容（带 UTF-8 缓冲，线程安全）
@@ -280,7 +305,7 @@ func (sw *SSEWriter) writeReasoningLocked(reasoning string) error {
 		&Delta{Reasoning: validReasoning},
 		nil, nil,
 	)
-	return WriteSSEData(sw.w, chunk)
+	return sw.writeSSEDataAndCollect(chunk)
 }
 
 // WriteReasoning 写入思考内容（带 UTF-8 缓冲，线程安全）
@@ -313,7 +338,7 @@ func (sw *SSEWriter) writeToolCallsLocked(toolCalls []core.ToolCallInfo) error {
 		&Delta{ToolCalls: openaiCalls},
 		nil, nil,
 	)
-	return WriteSSEData(sw.w, chunk)
+	return sw.writeSSEDataAndCollect(chunk)
 }
 
 // WriteToolCalls 写入工具调用（线程安全）
@@ -397,6 +422,19 @@ func (sw *SSEWriter) WriteHeartbeat() error {
 		nil, nil,
 	)
 	return WriteSSEData(sw.w, chunk)
+}
+
+// GetMergedResponse 返回收集的原始 SSE 事件（用于透传日志记录）
+func (sw *SSEWriter) GetMergedResponse() []interface{} {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+
+	// 转换为 []interface{} 用于日志输出
+	result := make([]interface{}, len(sw.collectedEvents))
+	for i, event := range sw.collectedEvents {
+		result[i] = event
+	}
+	return result
 }
 
 // SetSSEHeaders 设置流式响应头

@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -102,16 +103,16 @@ func Request(method, path string, status int, duration time.Duration) {
 		ColorGray, duration.Milliseconds(), ColorReset)
 }
 
-// ClientRequest 客户端请求日志
-func ClientRequest(method, path string, body interface{}) {
+// ClientRequest 客户端请求日志（原始 JSON 透传）
+func ClientRequest(method, path string, rawJSON []byte) {
 	if currentLogLevel < LogLow {
 		return
 	}
 
 	fmt.Println("==================== CLIENT REQUEST ====================")
 	fmt.Printf("%s[Client Request]%s %s%s%s %s\n", ColorPurple, ColorReset, ColorCyan, method, ColorReset, path)
-	if body != nil {
-		printJSON(body)
+	if len(rawJSON) > 0 {
+		fmt.Println(formatRawJSON(rawJSON))
 	}
 	fmt.Println("=========================================================")
 }
@@ -135,16 +136,16 @@ func ClientResponse(status int, duration time.Duration, body interface{}) {
 	fmt.Println("==========================================================")
 }
 
-// BackendRequest 后端请求日志
-func BackendRequest(method, url string, body interface{}) {
+// BackendRequest 后端请求日志（原始 JSON 透传）
+func BackendRequest(method, url string, rawJSON []byte) {
 	if currentLogLevel < LogHigh {
 		return
 	}
 
 	fmt.Println("==================== BACKEND REQUEST ====================")
 	fmt.Printf("%s[Backend Request]%s %s%s%s %s\n", ColorYellow, ColorReset, ColorCyan, method, ColorReset, url)
-	if body != nil {
-		printJSON(body)
+	if len(rawJSON) > 0 {
+		fmt.Println(formatRawJSON(rawJSON))
 	}
 	fmt.Println("==========================================================")
 }
@@ -168,6 +169,44 @@ func BackendResponse(status int, duration time.Duration, body interface{}) {
 	fmt.Println("===========================================================")
 }
 
+// BackendStreamResponse 后端流式响应日志（合并后的）
+func BackendStreamResponse(status int, duration time.Duration, body interface{}) {
+	if currentLogLevel < LogHigh {
+		return
+	}
+
+	statusColor := ColorGreen
+	if status >= 400 {
+		statusColor = ColorRed
+	}
+
+	fmt.Println("================ BACKEND STREAM RESPONSE ==================")
+	fmt.Printf("%s[Backend Stream]%s %s%d%s %s%dms%s\n", ColorGreen, ColorReset, statusColor, status, ColorReset, ColorGray, duration.Milliseconds(), ColorReset)
+	if body != nil {
+		printJSON(body)
+	}
+	fmt.Println("============================================================")
+}
+
+// ClientStreamResponse 客户端流式响应日志（合并后的）
+func ClientStreamResponse(status int, duration time.Duration, body interface{}) {
+	if currentLogLevel < LogLow {
+		return
+	}
+
+	statusColor := ColorGreen
+	if status >= 400 {
+		statusColor = ColorRed
+	}
+
+	fmt.Println("================ CLIENT STREAM RESPONSE ===================")
+	fmt.Printf("%s[Client Stream]%s %s%d%s %s%dms%s\n", ColorPurple, ColorReset, statusColor, status, ColorReset, ColorGray, duration.Milliseconds(), ColorReset)
+	if body != nil {
+		printJSON(body)
+	}
+	fmt.Println("============================================================")
+}
+
 func printJSON(v interface{}) {
 	jsonBytes, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -181,6 +220,20 @@ func printJSON(v interface{}) {
 		output = output[:5000] + "\n... (truncated)"
 	}
 	fmt.Println(output)
+}
+
+// formatRawJSON 格式化原始 JSON 字节（直接透传，仅美化格式）
+func formatRawJSON(rawJSON []byte) string {
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, rawJSON, "", "  "); err != nil {
+		// 无法格式化时直接返回原始字符串
+		return string(rawJSON)
+	}
+	output := indented.String()
+	if len(output) > 5000 {
+		output = output[:5000] + "\n... (truncated)"
+	}
+	return output
 }
 
 // Banner 打印启动横幅
