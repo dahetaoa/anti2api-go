@@ -17,7 +17,7 @@ func ConvertGeminiToAntigravity(model string, geminiReq *GeminiRequest, account 
 		Project:   getProjectID(account),
 		RequestID: utils.GenerateRequestID(),
 		Request: AntigravityInnerReq{
-			Contents:          geminiReq.Contents,
+			Contents:          sanitizeRequestContents(geminiReq.Contents),
 			SystemInstruction: geminiReq.SystemInstruction,
 			GenerationConfig:  buildGeminiGenerationConfig(geminiReq.GenerationConfig, modelName),
 			Tools:             geminiReq.Tools,
@@ -64,6 +64,63 @@ func buildGeminiGenerationConfig(reqConfig *GenerationConfig, modelName string) 
 	return config
 }
 
+// sanitizeRequestContents 清洗请求内容，处理空 Part、补充工具名称和签名
+func sanitizeRequestContents(contents []Content) []Content {
+	if len(contents) == 0 {
+		return contents
+	}
+
+	toolIDToName := make(map[string]string)
+	var lastSignature string
+
+	// 1. 扫描历史，建立映射并找回签名
+	for _, content := range contents {
+		for _, part := range content.Parts {
+			if part.ThoughtSignature != "" {
+				lastSignature = part.ThoughtSignature
+			}
+			if part.FunctionCall != nil {
+				if part.FunctionCall.ID != "" && part.FunctionCall.Name != "" {
+					toolIDToName[part.FunctionCall.ID] = part.FunctionCall.Name
+				}
+			}
+		}
+	}
+
+	// 2. 清洗数据
+	newContents := make([]Content, 0, len(contents))
+	for _, content := range contents {
+		newParts := make([]Part, 0, len(content.Parts))
+		for _, part := range content.Parts {
+			// 剔除空 Part (既没有 Text 也没有其他有效载荷)
+			if part.Text == "" && part.FunctionCall == nil && part.FunctionResponse == nil && part.InlineData == nil && !part.Thought {
+				continue
+			}
+
+			// 补充 FunctionResponse 名称
+			if part.FunctionResponse != nil && part.FunctionResponse.Name == "" {
+				if name, ok := toolIDToName[part.FunctionResponse.ID]; ok {
+					part.FunctionResponse.Name = name
+				}
+			}
+
+			// 尝试恢复丢失的 ThoughtSignature (针对 Gemini 3 Thinking 模型)
+			if part.FunctionCall != nil && part.FunctionCall.ID != "" && part.ThoughtSignature == "" {
+				part.ThoughtSignature = lastSignature
+			}
+
+			newParts = append(newParts, part)
+		}
+
+		if len(newParts) > 0 {
+			content.Parts = newParts
+			newContents = append(newContents, content)
+		}
+	}
+
+	return newContents
+}
+
 // ExtractGeminiResponse Antigravity 响应 → 标准 Gemini 响应
 func ExtractGeminiResponse(antigravityResp *AntigravityResponse) *GeminiResponse {
 	resp := &GeminiResponse{
@@ -74,8 +131,7 @@ func ExtractGeminiResponse(antigravityResp *AntigravityResponse) *GeminiResponse
 	// 清理非标准字段
 	for i := range resp.Candidates {
 		for _ = range resp.Candidates[i].Content.Parts {
-			// 如果有 thoughtSignature 等非标准字段，这里清理
-			// 在 Go 中由于使用 struct，非定义字段自动忽略
+			// 保持 thoughtSignature 字段以供客户端后续使用
 		}
 		// 确保有 index 字段
 		if resp.Candidates[i].Index == 0 && i > 0 {
@@ -127,9 +183,8 @@ func sanitizeCandidates(resp map[string]interface{}) {
 		if content, ok := candidate["content"].(map[string]interface{}); ok {
 			if parts, ok := content["parts"].([]interface{}); ok {
 				for _, p := range parts {
-					if part, ok := p.(map[string]interface{}); ok {
-						// 删除 thoughtSignature 等非标准字段
-						delete(part, "thoughtSignature")
+					if _, ok := p.(map[string]interface{}); ok {
+						// 停止删除 thoughtSignature，允许透传
 					}
 				}
 			}
