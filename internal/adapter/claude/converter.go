@@ -116,32 +116,71 @@ func mapClaudeRoleToAntigravity(role string) string {
 
 // convertClaudeContentToParts 将 Claude 内容转换为 Antigravity parts
 func convertClaudeContentToParts(content interface{}, appendThinkingHint bool) []Part {
-	var textContent string
+	var parts []Part
 
 	switch v := content.(type) {
 	case string:
 		// 移除 invoke 和 tool_result XML 标签（防止重复）
-		textContent = invokeRegex.ReplaceAllString(v, "")
+		textContent := invokeRegex.ReplaceAllString(v, "")
 		textContent = toolResultRegex.ReplaceAllString(textContent, "")
+		if textContent != "" {
+			parts = append(parts, Part{Text: textContent})
+		}
 	case []interface{}:
 		// 复杂内容块数组
-		var textParts []string
 		for _, item := range v {
 			if block, ok := item.(map[string]interface{}); ok {
-				part := normalizeClaudeBlock(block)
-				if part != "" {
-					textParts = append(textParts, part)
-				}
+				blockParts := normalizeClaudeBlockToParts(block)
+				parts = append(parts, blockParts...)
 			}
 		}
-		textContent = strings.Join(textParts, "\n")
 	}
 
-	if textContent == "" {
+	return parts
+}
+
+// normalizeClaudeBlockToParts 将单个 Claude 内容块转换为 Antigravity Part 列表
+func normalizeClaudeBlockToParts(block map[string]interface{}) []Part {
+	blockType, _ := block["type"].(string)
+
+	switch blockType {
+	case "text":
+		text, _ := block["text"].(string)
+		// 移除 invoke 和 tool_result XML 标签
+		result := invokeRegex.ReplaceAllString(text, "")
+		result = toolResultRegex.ReplaceAllString(result, "")
+		if result != "" {
+			return []Part{{Text: result}}
+		}
+
+	case "thinking":
+		thinking, _ := block["thinking"].(string)
+		signature, _ := block["signature"].(string)
+		if thinking != "" {
+			return []Part{{
+				Text:             thinking,
+				Thought:          true,
+				ThoughtSignature: signature, // 将 Claude signature 映射为 Vertex thoughtSignature
+			}}
+		}
+
+	case "tool_result":
+		toolUseID, _ := block["tool_use_id"].(string)
+		content := extractToolResultContent(block["content"])
+		return []Part{{Text: fmt.Sprintf(`<tool_result id="%s">%s</tool_result>`, toolUseID, content)}}
+
+	case "tool_use":
+		name, _ := block["name"].(string)
+		input := block["input"]
+		params := formatToolUseParams(input)
+		return []Part{{Text: fmt.Sprintf("<invoke name=\"%s\">\n%s\n</invoke>", name, params)}}
+
+	case "image":
+		// 图片内容 - 暂时忽略，因为需要特殊处理
 		return nil
 	}
 
-	return []Part{{Text: textContent}}
+	return nil
 }
 
 // ConvertClaudeToolsToAntigravity 将 Claude 工具定义转换为 Antigravity 格式
@@ -216,11 +255,16 @@ func ConvertAntigravityToClaudeResponse(resp *AntigravityResponse, requestID, mo
 	parts := resp.Response.Candidates[0].Content.Parts
 
 	var thinking, content string
+	var thinkingSignature string
 	var toolCalls []ToolCallInfo
 
 	for _, part := range parts {
 		if part.Thought {
 			thinking += part.Text
+			// 捕获 thinking block 的 signature
+			if part.ThoughtSignature != "" {
+				thinkingSignature = part.ThoughtSignature
+			}
 		} else if part.Text != "" {
 			content += part.Text
 		} else if part.FunctionCall != nil {
@@ -238,8 +282,8 @@ func ConvertAntigravityToClaudeResponse(resp *AntigravityResponse, requestID, mo
 		}
 	}
 
-	// 构建内容块
-	contentBlocks := BuildClaudeContentBlocksWithThinking(thinking, content, toolCalls)
+	// 构建内容块（包含 signature）
+	contentBlocks := BuildClaudeContentBlocksWithThinking(thinking, content, toolCalls, thinkingSignature)
 
 	// 计算 output tokens
 	outputTokens := 0
@@ -287,41 +331,6 @@ func extractClaudeSystem(system interface{}) string {
 		}
 		return strings.Join(texts, "\n")
 	}
-	return ""
-}
-
-// normalizeClaudeBlock 规范化单个 Claude 内容块
-func normalizeClaudeBlock(block map[string]interface{}) string {
-	blockType, _ := block["type"].(string)
-
-	switch blockType {
-	case "text":
-		text, _ := block["text"].(string)
-		// 移除 invoke 和 tool_result XML 标签
-		result := invokeRegex.ReplaceAllString(text, "")
-		result = toolResultRegex.ReplaceAllString(result, "")
-		return result
-
-	case "thinking":
-		thinking, _ := block["thinking"].(string)
-		return ThinkingStartTag + thinking + ThinkingEndTag
-
-	case "tool_result":
-		toolUseID, _ := block["tool_use_id"].(string)
-		content := extractToolResultContent(block["content"])
-		return fmt.Sprintf(`<tool_result id="%s">%s</tool_result>`, toolUseID, content)
-
-	case "tool_use":
-		name, _ := block["name"].(string)
-		input := block["input"]
-		params := formatToolUseParams(input)
-		return fmt.Sprintf("<invoke name=\"%s\">\n%s\n</invoke>", name, params)
-
-	case "image":
-		// 图片内容 - 暂时忽略，因为需要特殊处理
-		return ""
-	}
-
 	return ""
 }
 
@@ -402,18 +411,19 @@ func ConvertToolCallsToClaudeBlocks(toolCalls []ToolCallInfo) []ClaudeContentBlo
 
 // BuildClaudeContentBlocks 构建 Claude 响应内容块
 func BuildClaudeContentBlocks(content string, toolCalls []ToolCallInfo) []ClaudeContentBlock {
-	return BuildClaudeContentBlocksWithThinking("", content, toolCalls)
+	return BuildClaudeContentBlocksWithThinking("", content, toolCalls, "")
 }
 
 // BuildClaudeContentBlocksWithThinking 构建 Claude 响应内容块（包含 thinking）
-func BuildClaudeContentBlocksWithThinking(thinking, content string, toolCalls []ToolCallInfo) []ClaudeContentBlock {
+func BuildClaudeContentBlocksWithThinking(thinking, content string, toolCalls []ToolCallInfo, thinkingSignature string) []ClaudeContentBlock {
 	var blocks []ClaudeContentBlock
 
 	// thinking 块必须在 text 块之前
 	if thinking != "" {
 		blocks = append(blocks, ClaudeContentBlock{
-			Type:     "thinking",
-			Thinking: thinking,
+			Type:      "thinking",
+			Thinking:  thinking,
+			Signature: thinkingSignature,
 		})
 	}
 

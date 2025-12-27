@@ -132,6 +132,7 @@ type ClaudeContentBlock struct {
 	Type      string             `json:"type"`                  // text, thinking, tool_use, tool_result, image
 	Text      string             `json:"text,omitempty"`        // type=text
 	Thinking  string             `json:"thinking,omitempty"`    // type=thinking
+	Signature string             `json:"signature,omitempty"`   // type=thinking 的签名验证字段
 	ID        string             `json:"id,omitempty"`          // type=tool_use
 	Name      string             `json:"name,omitempty"`        // type=tool_use
 	Input     interface{}        `json:"input,omitempty"`       // type=tool_use
@@ -239,10 +240,11 @@ type ClaudeSSEContentBlockDelta struct {
 
 // ClaudeSSEDelta 增量负载
 type ClaudeSSEDelta struct {
-	Type        string `json:"type"`                   // text_delta, thinking_delta, input_json_delta
+	Type        string `json:"type"`                   // text_delta, thinking_delta, input_json_delta, signature_delta
 	Text        string `json:"text,omitempty"`         // type=text_delta
 	Thinking    string `json:"thinking,omitempty"`     // type=thinking_delta
 	PartialJSON string `json:"partial_json,omitempty"` // type=input_json_delta
+	Signature   string `json:"signature,omitempty"`    // type=signature_delta
 }
 
 // ClaudeSSEContentBlockStop content_block_stop 事件

@@ -109,12 +109,12 @@ func ClientRequest(method, path string, rawJSON []byte) {
 		return
 	}
 
-	fmt.Println("==================== CLIENT REQUEST ====================")
-	fmt.Printf("%s[Client Request]%s %s%s%s %s\n", ColorPurple, ColorReset, ColorCyan, method, ColorReset, path)
+	fmt.Printf("%s===================== 客户端请求 ======================%s\n", ColorPurple, ColorReset)
+	fmt.Printf("%s[客户端请求]%s %s%s%s %s\n", ColorPurple, ColorReset, ColorCyan, method, ColorReset, path)
 	if len(rawJSON) > 0 {
 		fmt.Println(formatRawJSON(rawJSON))
 	}
-	fmt.Println("=========================================================")
+	fmt.Printf("%s=========================================================%s\n", ColorPurple, ColorReset)
 }
 
 // ClientResponse 客户端响应日志
@@ -128,12 +128,12 @@ func ClientResponse(status int, duration time.Duration, body interface{}) {
 		statusColor = ColorRed
 	}
 
-	fmt.Println("==================== CLIENT RESPONSE ====================")
-	fmt.Printf("%s[Client Response]%s %s%d%s %s%dms%s\n", ColorPurple, ColorReset, statusColor, status, ColorReset, ColorGray, duration.Milliseconds(), ColorReset)
+	fmt.Printf("%s===================== 客户端响应 ======================%s\n", ColorPurple, ColorReset)
+	fmt.Printf("%s[客户端响应]%s %s%d%s %s%dms%s\n", ColorPurple, ColorReset, statusColor, status, ColorReset, ColorGray, duration.Milliseconds(), ColorReset)
 	if body != nil {
 		printJSON(body)
 	}
-	fmt.Println("==========================================================")
+	fmt.Printf("%s==========================================================%s\n", ColorPurple, ColorReset)
 }
 
 // BackendRequest 后端请求日志（原始 JSON 透传）
@@ -142,12 +142,12 @@ func BackendRequest(method, url string, rawJSON []byte) {
 		return
 	}
 
-	fmt.Println("==================== BACKEND REQUEST ====================")
-	fmt.Printf("%s[Backend Request]%s %s%s%s %s\n", ColorYellow, ColorReset, ColorCyan, method, ColorReset, url)
+	fmt.Printf("%s====================== 后端请求 ========================%s\n", ColorYellow, ColorReset)
+	fmt.Printf("%s[后端请求]%s %s%s%s %s\n", ColorYellow, ColorReset, ColorCyan, method, ColorReset, url)
 	if len(rawJSON) > 0 {
 		fmt.Println(formatRawJSON(rawJSON))
 	}
-	fmt.Println("==========================================================")
+	fmt.Printf("%s==========================================================%s\n", ColorYellow, ColorReset)
 }
 
 // BackendResponse 后端响应日志
@@ -161,12 +161,12 @@ func BackendResponse(status int, duration time.Duration, body interface{}) {
 		statusColor = ColorRed
 	}
 
-	fmt.Println("==================== BACKEND RESPONSE ====================")
-	fmt.Printf("%s[Backend Response]%s %s%d%s %s%dms%s\n", ColorGreen, ColorReset, statusColor, status, ColorReset, ColorGray, duration.Milliseconds(), ColorReset)
+	fmt.Printf("%s====================== 后端响应 ========================%s\n", ColorGreen, ColorReset)
+	fmt.Printf("%s[后端响应]%s %s%d%s %s%dms%s\n", ColorGreen, ColorReset, statusColor, status, ColorReset, ColorGray, duration.Milliseconds(), ColorReset)
 	if body != nil {
 		printJSON(body)
 	}
-	fmt.Println("===========================================================")
+	fmt.Printf("%s==========================================================%s\n", ColorGreen, ColorReset)
 }
 
 // BackendStreamResponse 后端流式响应日志（合并后的）
@@ -180,12 +180,12 @@ func BackendStreamResponse(status int, duration time.Duration, body interface{})
 		statusColor = ColorRed
 	}
 
-	fmt.Println("================ BACKEND STREAM RESPONSE ==================")
-	fmt.Printf("%s[Backend Stream]%s %s%d%s %s%dms%s\n", ColorGreen, ColorReset, statusColor, status, ColorReset, ColorGray, duration.Milliseconds(), ColorReset)
+	fmt.Printf("%s==================== 后端流式响应 =======================%s\n", ColorGreen, ColorReset)
+	fmt.Printf("%s[后端流式]%s %s%d%s %s%dms%s\n", ColorGreen, ColorReset, statusColor, status, ColorReset, ColorGray, duration.Milliseconds(), ColorReset)
 	if body != nil {
 		printJSON(body)
 	}
-	fmt.Println("============================================================")
+	fmt.Printf("%s==========================================================%s\n", ColorGreen, ColorReset)
 }
 
 // ClientStreamResponse 客户端流式响应日志（合并后的）
@@ -199,12 +199,12 @@ func ClientStreamResponse(status int, duration time.Duration, body interface{}) 
 		statusColor = ColorRed
 	}
 
-	fmt.Println("================ CLIENT STREAM RESPONSE ===================")
-	fmt.Printf("%s[Client Stream]%s %s%d%s %s%dms%s\n", ColorPurple, ColorReset, statusColor, status, ColorReset, ColorGray, duration.Milliseconds(), ColorReset)
+	fmt.Printf("%s=================== 客户端流式响应 =======================%s\n", ColorPurple, ColorReset)
+	fmt.Printf("%s[客户端流式]%s %s%d%s %s%dms%s\n", ColorPurple, ColorReset, statusColor, status, ColorReset, ColorGray, duration.Milliseconds(), ColorReset)
 	if body != nil {
 		printJSON(body)
 	}
-	fmt.Println("============================================================")
+	fmt.Printf("%s==========================================================%s\n", ColorPurple, ColorReset)
 }
 
 func printJSON(v interface{}) {

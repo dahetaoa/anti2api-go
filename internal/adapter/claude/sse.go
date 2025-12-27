@@ -47,7 +47,8 @@ type SSEEmitter struct {
 	thinkingBlockIndex *int
 	finished           bool
 	totalOutputTokens  int
-	hasToolCalls       bool // 记录是否遇到过工具调用
+	hasToolCalls       bool   // 记录是否遇到过工具调用
+	pendingSignature   string // 待发送的 thinking block signature
 	mu                 sync.Mutex
 	// 用于收集原始 JSON 以便日志记录（透传）
 	collectedEvents []map[string]interface{}
@@ -72,6 +73,7 @@ func NewSSEEmitter(w http.ResponseWriter, requestID string, model string, inputT
 		thinkingBlockIndex: nil,
 		finished:           false,
 		totalOutputTokens:  0,
+		pendingSignature:   "",
 		collectedEvents:    nil,
 	}
 }
@@ -92,6 +94,10 @@ func (e *SSEEmitter) ProcessData(data *StreamData) error {
 			// 1. 处理 Thinking
 			if err := e.sendThinkingLocked(part.Text); err != nil {
 				return err
+			}
+			// 捕获 thinking block 的 signature
+			if part.ThoughtSignature != "" {
+				e.pendingSignature = part.ThoughtSignature
 			}
 		} else if part.Text != "" {
 			// 2. 处理普通文本
@@ -127,6 +133,10 @@ func (e *SSEEmitter) ProcessPart(part StreamDataPart) error {
 	defer e.mu.Unlock()
 
 	if part.Thought {
+		// 捕获 thinking block 的 signature
+		if part.ThoughtSignature != "" {
+			e.pendingSignature = part.ThoughtSignature
+		}
 		return e.sendThinkingLocked(part.Text)
 	} else if part.Text != "" {
 		return e.sendTextLocked(part.Text)
@@ -250,6 +260,22 @@ func (e *SSEEmitter) closeThinkingBlock() error {
 	}
 	index := *e.thinkingBlockIndex
 	e.thinkingBlockIndex = nil
+
+	// 在关闭 thinking block 之前发送 signature_delta 事件（按 Claude API 规范）
+	if e.pendingSignature != "" {
+		if err := e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
+			Type:  "content_block_delta",
+			Index: index,
+			Delta: ClaudeSSEDelta{
+				Type:      "signature_delta",
+				Signature: e.pendingSignature,
+			},
+		}); err != nil {
+			return err
+		}
+		e.pendingSignature = "" // 清空已发送的 signature
+	}
+
 	return e.writeSSE("content_block_stop", ClaudeSSEContentBlockStop{
 		Type:  "content_block_stop",
 		Index: index,
@@ -426,15 +452,88 @@ func (e *SSEEmitter) Finish(usage *Usage) error {
 }
 
 // GetMergedResponse 返回收集的原始 SSE 事件（用于透传日志记录）
+// 合并连续的 thinking_delta 和 text_delta 事件以提高可读性
 func (e *SSEEmitter) GetMergedResponse() []interface{} {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// 转换为 []interface{} 用于日志输出
-	result := make([]interface{}, len(e.collectedEvents))
-	for i, event := range e.collectedEvents {
-		result[i] = event
+	var result []interface{}
+	var pendingThinking string
+	var pendingText string
+	var pendingIndex int
+
+	// 辅助函数：刷新待处理的合并内容
+	flushPending := func() {
+		if pendingThinking != "" {
+			result = append(result, map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": pendingIndex,
+				"delta": map[string]interface{}{
+					"type":     "thinking_delta",
+					"thinking": pendingThinking,
+				},
+			})
+			pendingThinking = ""
+		}
+		if pendingText != "" {
+			result = append(result, map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": pendingIndex,
+				"delta": map[string]interface{}{
+					"type": "text_delta",
+					"text": pendingText,
+				},
+			})
+			pendingText = ""
+		}
 	}
+
+	for _, event := range e.collectedEvents {
+		eventType, _ := event["type"].(string)
+
+		// 检查是否是 content_block_delta 事件
+		if eventType == "content_block_delta" {
+			delta, _ := event["delta"].(map[string]interface{})
+			deltaType, _ := delta["type"].(string)
+			index, _ := event["index"].(float64)
+
+			switch deltaType {
+			case "thinking_delta":
+				// 合并 thinking_delta
+				thinking, _ := delta["thinking"].(string)
+				if pendingText != "" {
+					// 先刷新待处理的 text
+					flushPending()
+				}
+				if pendingThinking == "" {
+					pendingIndex = int(index)
+				}
+				pendingThinking += thinking
+				continue
+
+			case "text_delta":
+				// 合并 text_delta
+				text, _ := delta["text"].(string)
+				if pendingThinking != "" {
+					// 先刷新待处理的 thinking
+					flushPending()
+				}
+				if pendingText == "" {
+					pendingIndex = int(index)
+				}
+				pendingText += text
+				continue
+			}
+		}
+
+		// 非 thinking_delta/text_delta 事件：先刷新待处理内容，再添加当前事件
+		flushPending()
+		result = append(result, event)
+	}
+
+	// 刷新最后的待处理内容
+	flushPending()
+
 	return result
 }
 
