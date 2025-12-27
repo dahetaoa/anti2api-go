@@ -46,11 +46,8 @@ func ConvertClaudeToAntigravity(req *ClaudeMessagesRequest, account *store.Accou
 		}
 	}
 
-	// 检查是否启用 thinking
-	thinkingEnabled := req.Thinking != nil && req.Thinking.Type == "enabled"
-
 	// 转换消息为 Antigravity contents 格式
-	contents := convertClaudeMessagesToContents(req.Messages, thinkingEnabled)
+	contents := convertClaudeMessagesToContents(req.Messages)
 	innerReq.Contents = contents
 
 	// 转换工具
@@ -79,7 +76,7 @@ func getClaudeProjectID(account *store.Account) string {
 }
 
 // convertClaudeMessagesToContents 将 Claude 消息转换为 Antigravity contents
-func convertClaudeMessagesToContents(messages []ClaudeMessage, thinkingEnabled bool) []Content {
+func convertClaudeMessagesToContents(messages []ClaudeMessage) []Content {
 	var contents []Content
 	toolIDToName := make(map[string]string)
 
