@@ -259,12 +259,13 @@ func ConvertAntigravityToClaudeResponse(resp *AntigravityResponse, requestID, mo
 	var toolCalls []ToolCallInfo
 
 	for _, part := range parts {
+		// 捕获任意 part 的 thought signature
+		if part.ThoughtSignature != "" {
+			thinkingSignature = part.ThoughtSignature
+		}
+
 		if part.Thought {
 			thinking += part.Text
-			// 捕获 thinking block 的 signature
-			if part.ThoughtSignature != "" {
-				thinkingSignature = part.ThoughtSignature
-			}
 		} else if part.Text != "" {
 			content += part.Text
 		} else if part.FunctionCall != nil {
@@ -313,7 +314,66 @@ func ConvertAntigravityToClaudeResponse(resp *AntigravityResponse, requestID, mo
 var (
 	invokeRegex     = regexp.MustCompile(`(?i)<invoke\b[^>]*>[\s\S]*?</invoke>`)
 	toolResultRegex = regexp.MustCompile(`(?i)<tool_result\b[^>]*>[\s\S]*?</tool_result>`)
+	// 用于解析 invoke 标签的正则
+	invokeNameRegex = regexp.MustCompile(`(?i)<invoke\s+name="([^"]+)"`)
+	parameterRegex  = regexp.MustCompile(`(?i)<parameter\s+name="([^"]+)">([\s\S]*?)</parameter>`)
 )
+
+// XMLToolCall 表示从文本中解析出的 XML 格式工具调用
+type XMLToolCall struct {
+	Name string
+	Args map[string]interface{}
+}
+
+// ParseXMLToolCalls 从文本中解析 XML 格式的工具调用
+// 返回解析出的工具调用列表和清理后的文本（移除已解析的 invoke 标签）
+func ParseXMLToolCalls(text string) ([]XMLToolCall, string) {
+	var toolCalls []XMLToolCall
+
+	// 查找所有 invoke 标签
+	matches := invokeRegex.FindAllString(text, -1)
+	if len(matches) == 0 {
+		return nil, text
+	}
+
+	for _, match := range matches {
+		// 提取工具名称
+		nameMatch := invokeNameRegex.FindStringSubmatch(match)
+		if len(nameMatch) < 2 {
+			continue
+		}
+		toolName := nameMatch[1]
+
+		// 提取参数
+		args := make(map[string]interface{})
+		paramMatches := parameterRegex.FindAllStringSubmatch(match, -1)
+		for _, pm := range paramMatches {
+			if len(pm) >= 3 {
+				paramName := pm[1]
+				paramValue := strings.TrimSpace(pm[2])
+				// 尝试解析为 JSON，如果失败则作为字符串
+				var jsonValue interface{}
+				if err := json.Unmarshal([]byte(paramValue), &jsonValue); err == nil {
+					args[paramName] = jsonValue
+				} else {
+					args[paramName] = paramValue
+				}
+			}
+		}
+
+		toolCalls = append(toolCalls, XMLToolCall{
+			Name: toolName,
+			Args: args,
+		})
+	}
+
+	// 从文本中移除已解析的 invoke 标签
+	cleanedText := invokeRegex.ReplaceAllString(text, "")
+	// 清理多余的空行
+	cleanedText = strings.TrimSpace(cleanedText)
+
+	return toolCalls, cleanedText
+}
 
 // extractClaudeSystem 提取 Claude system 内容
 func extractClaudeSystem(system interface{}) string {

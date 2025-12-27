@@ -158,7 +158,17 @@ func handleClaudeStreamRequest(w http.ResponseWriter, r *http.Request, req *clau
 	streamResult, err := vertex.ParseStreamWithResult(resp, func(data *vertex.StreamData) error {
 		// 处理每个 part
 		if len(data.Response.Candidates) > 0 {
-			for _, part := range data.Response.Candidates[0].Content.Parts {
+			candidate := data.Response.Candidates[0]
+
+			// 1. 先捕获整个 chunk 中所有的 signature (适配 Gemini 迟到 signature)
+			for _, part := range candidate.Content.Parts {
+				if part.ThoughtSignature != "" {
+					emitter.SetSignature(part.ThoughtSignature)
+				}
+			}
+
+			// 2. 按序处理每个 part
+			for _, part := range candidate.Content.Parts {
 				if err := emitter.ProcessPart(claude.StreamDataPart{
 					Text:             part.Text,
 					FunctionCall:     part.FunctionCall,

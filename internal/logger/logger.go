@@ -213,13 +213,7 @@ func printJSON(v interface{}) {
 		fmt.Printf("%v\n", v)
 		return
 	}
-
-	// 限制输出长度
-	output := string(jsonBytes)
-	if len(output) > 5000 {
-		output = output[:5000] + "\n... (truncated)"
-	}
-	fmt.Println(output)
+	fmt.Println(string(jsonBytes))
 }
 
 // formatRawJSON 格式化原始 JSON 字节（直接透传，仅美化格式）
@@ -229,11 +223,7 @@ func formatRawJSON(rawJSON []byte) string {
 		// 无法格式化时直接返回原始字符串
 		return string(rawJSON)
 	}
-	output := indented.String()
-	if len(output) > 5000 {
-		output = output[:5000] + "\n... (truncated)"
-	}
-	return output
+	return indented.String()
 }
 
 // Banner 打印启动横幅

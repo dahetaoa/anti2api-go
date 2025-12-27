@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"anti2api-golang/internal/core"
@@ -38,18 +39,21 @@ type StreamDataPart struct {
 
 // SSEEmitter Claude SSE 发射器
 type SSEEmitter struct {
-	w                  http.ResponseWriter
-	requestID          string
-	model              string
-	inputTokens        int
-	nextIndex          int
-	textBlockIndex     *int
-	thinkingBlockIndex *int
-	finished           bool
-	totalOutputTokens  int
-	hasToolCalls       bool   // 记录是否遇到过工具调用
-	pendingSignature   string // 待发送的 thinking block signature
-	mu                 sync.Mutex
+	w                      http.ResponseWriter
+	requestID              string
+	model                  string
+	inputTokens            int
+	nextIndex              int
+	textBlockIndex         *int
+	thinkingBlockIndex     *int
+	finished               bool
+	totalOutputTokens      int
+	hasToolCalls           bool   // 记录是否遇到过工具调用
+	pendingSignature       string // 待发送的 thinking block signature
+	signatureSent          bool   // 标记 signature 是否已发送
+	lastThinkingBlockIndex *int   // 记录最近一个思考块的索引，用于处理迟到的 signature
+	textBuffer             string // 文本缓冲区，用于检测跨块的 XML 工具调用
+	mu                     sync.Mutex
 	// 用于收集原始 JSON 以便日志记录（透传）
 	collectedEvents []map[string]interface{}
 }
@@ -64,17 +68,19 @@ func NewSSEEmitter(w http.ResponseWriter, requestID string, model string, inputT
 	}
 
 	return &SSEEmitter{
-		w:                  w,
-		requestID:          requestID,
-		model:              model,
-		inputTokens:        inputTokens,
-		nextIndex:          0,
-		textBlockIndex:     nil,
-		thinkingBlockIndex: nil,
-		finished:           false,
-		totalOutputTokens:  0,
-		pendingSignature:   "",
-		collectedEvents:    nil,
+		w:                      w,
+		requestID:              requestID,
+		model:                  model,
+		inputTokens:            inputTokens,
+		nextIndex:              0,
+		textBlockIndex:         nil,
+		thinkingBlockIndex:     nil,
+		finished:               false,
+		totalOutputTokens:      0,
+		pendingSignature:       "",
+		signatureSent:          false,
+		lastThinkingBlockIndex: nil,
+		collectedEvents:        nil,
 	}
 }
 
@@ -90,14 +96,15 @@ func (e *SSEEmitter) ProcessData(data *StreamData) error {
 	candidate := data.Response.Candidates[0]
 
 	for _, part := range candidate.Content.Parts {
+		// 捕获 thinking block 的 signature (无论 thought 是否为 true)
+		if part.ThoughtSignature != "" {
+			e.pendingSignature = part.ThoughtSignature
+		}
+
 		if part.Thought {
 			// 1. 处理 Thinking
 			if err := e.sendThinkingLocked(part.Text); err != nil {
 				return err
-			}
-			// 捕获 thinking block 的 signature
-			if part.ThoughtSignature != "" {
-				e.pendingSignature = part.ThoughtSignature
 			}
 		} else if part.Text != "" {
 			// 2. 处理普通文本
@@ -127,16 +134,41 @@ func (e *SSEEmitter) ProcessData(data *StreamData) error {
 	return nil
 }
 
+// SetSignature 显式设置 signature，并尝试在合适时机发送
+func (e *SSEEmitter) SetSignature(signature string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if signature == "" {
+		return nil
+	}
+
+	e.pendingSignature = signature
+
+	// 如果当前思考块还在打开，只需要存着，closeThinkingBlock 会发送
+	// 如果思考块已经“关闭”了（thinkingBlockIndex == nil），但我们有上一个索引，立即补发
+	if e.thinkingBlockIndex == nil && e.lastThinkingBlockIndex != nil {
+		return e.sendSignatureDeltaLocked(signature)
+	}
+
+	return nil
+}
+
 // ProcessPart 处理单个 Part 数据（外部调用）
 func (e *SSEEmitter) ProcessPart(part StreamDataPart) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if part.Thought {
-		// 捕获 thinking block 的 signature
-		if part.ThoughtSignature != "" {
-			e.pendingSignature = part.ThoughtSignature
+	// 捕获 thinking block 的 signature (无论 thought 是否为 true)
+	if part.ThoughtSignature != "" {
+		e.pendingSignature = part.ThoughtSignature
+		// 尝试补发（如果块已关闭）
+		if e.thinkingBlockIndex == nil && e.lastThinkingBlockIndex != nil {
+			e.sendSignatureDeltaLocked(part.ThoughtSignature)
 		}
+	}
+
+	if part.Thought {
 		return e.sendThinkingLocked(part.Text)
 	} else if part.Text != "" {
 		return e.sendTextLocked(part.Text)
@@ -229,6 +261,8 @@ func (e *SSEEmitter) ensureThinkingBlock() error {
 	index := e.nextIndex
 	e.nextIndex++
 	e.thinkingBlockIndex = &index
+	e.lastThinkingBlockIndex = &index // 记录最近的索引
+	e.signatureSent = false           // 新块开始，重置标志
 
 	return e.writeSSE("content_block_start", ClaudeSSEContentBlockStart{
 		Type:  "content_block_start",
@@ -261,19 +295,9 @@ func (e *SSEEmitter) closeThinkingBlock() error {
 	index := *e.thinkingBlockIndex
 	e.thinkingBlockIndex = nil
 
-	// 在关闭 thinking block 之前发送 signature_delta 事件（按 Claude API 规范）
+	// 在关闭 thinking block 之前尝试发送 signature_delta
 	if e.pendingSignature != "" {
-		if err := e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
-			Type:  "content_block_delta",
-			Index: index,
-			Delta: ClaudeSSEDelta{
-				Type:      "signature_delta",
-				Signature: e.pendingSignature,
-			},
-		}); err != nil {
-			return err
-		}
-		e.pendingSignature = "" // 清空已发送的 signature
+		e.sendSignatureDeltaLocked(e.pendingSignature)
 	}
 
 	return e.writeSSE("content_block_stop", ClaudeSSEContentBlockStop{
@@ -282,11 +306,102 @@ func (e *SSEEmitter) closeThinkingBlock() error {
 	})
 }
 
+// sendSignatureDeltaLocked 发送 signature_delta（内部，需持有锁）
+func (e *SSEEmitter) sendSignatureDeltaLocked(signature string) error {
+	if signature == "" || e.signatureSent || e.lastThinkingBlockIndex == nil {
+		return nil
+	}
+
+	index := *e.lastThinkingBlockIndex
+	err := e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
+		Type:  "content_block_delta",
+		Index: index,
+		Delta: ClaudeSSEDelta{
+			Type:      "signature_delta",
+			Signature: signature,
+		},
+	})
+
+	if err == nil {
+		e.signatureSent = true
+		e.pendingSignature = "" // 已发送，清空
+	}
+	return err
+}
+
 // sendTextLocked 发送文本增量（内部）
+// 使用缓冲机制检测跨块的 XML 工具调用
 func (e *SSEEmitter) sendTextLocked(text string) error {
 	if text == "" {
 		return nil
 	}
+
+	// 累积文本到缓冲区
+	e.textBuffer += text
+
+	// 检查缓冲区中是否有 XML 工具调用的迹象
+	hasInvokeStart := strings.Contains(e.textBuffer, "<invoke")
+	hasInvokeEnd := strings.Contains(e.textBuffer, "</invoke>")
+
+	// 如果检测到 <invoke 开始标签但没有结束标签，继续缓冲等待完整标签
+	if hasInvokeStart && !hasInvokeEnd {
+		// 继续缓冲，不发送任何内容
+		return nil
+	}
+
+	// 如果有完整的 invoke 标签，解析并处理
+	if hasInvokeStart && hasInvokeEnd {
+		xmlToolCalls, cleanedText := ParseXMLToolCalls(e.textBuffer)
+
+		if len(xmlToolCalls) > 0 {
+			// 清空缓冲区
+			e.textBuffer = ""
+
+			// 确保思考块先关闭
+			if err := e.closeThinkingBlock(); err != nil {
+				return err
+			}
+
+			// 如果有清理后的文本，先发送文本
+			if cleanedText != "" {
+				if err := e.ensureTextBlock(); err != nil {
+					return err
+				}
+				e.totalOutputTokens += EstimateClaudeTokens(cleanedText)
+				if err := e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
+					Type:  "content_block_delta",
+					Index: *e.textBlockIndex,
+					Delta: ClaudeSSEDelta{
+						Type: "text_delta",
+						Text: cleanedText,
+					},
+				}); err != nil {
+					return err
+				}
+				// 关闭文本块为工具调用腾出位置
+				if err := e.closeTextBlock(); err != nil {
+					return err
+				}
+			}
+
+			// 发送所有 XML 工具调用
+			for _, xmlTC := range xmlToolCalls {
+				tc := core.ToolCallInfo{
+					ID:   utils.GenerateToolCallID(),
+					Name: xmlTC.Name,
+					Args: xmlTC.Args,
+				}
+				if err := e.sendToolCallLocked(tc); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+
+	// 没有 XML 工具调用迹象，正常发送缓冲区内容
+	textToSend := e.textBuffer
+	e.textBuffer = ""
 
 	// 确保思考块先关闭，避免与正文交叉
 	if err := e.closeThinkingBlock(); err != nil {
@@ -297,14 +412,14 @@ func (e *SSEEmitter) sendTextLocked(text string) error {
 		return err
 	}
 
-	e.totalOutputTokens += EstimateClaudeTokens(text)
+	e.totalOutputTokens += EstimateClaudeTokens(textToSend)
 
 	return e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
 		Type:  "content_block_delta",
 		Index: *e.textBlockIndex,
 		Delta: ClaudeSSEDelta{
 			Type: "text_delta",
-			Text: text,
+			Text: textToSend,
 		},
 	})
 }
@@ -411,6 +526,56 @@ func (e *SSEEmitter) Finish(usage *Usage) error {
 		return nil
 	}
 	e.finished = true
+
+	// 刷新缓冲区中剩余的内容（可能包含 XML 工具调用）
+	if e.textBuffer != "" {
+		// 检查是否有 XML 工具调用
+		xmlToolCalls, cleanedText := ParseXMLToolCalls(e.textBuffer)
+
+		if len(xmlToolCalls) > 0 {
+			// 确保思考块先关闭
+			e.closeThinkingBlock()
+
+			// 如果有清理后的文本，先发送文本
+			if cleanedText != "" {
+				e.ensureTextBlock()
+				e.totalOutputTokens += EstimateClaudeTokens(cleanedText)
+				e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
+					Type:  "content_block_delta",
+					Index: *e.textBlockIndex,
+					Delta: ClaudeSSEDelta{
+						Type: "text_delta",
+						Text: cleanedText,
+					},
+				})
+				e.closeTextBlock()
+			}
+
+			// 发送所有 XML 工具调用
+			for _, xmlTC := range xmlToolCalls {
+				tc := core.ToolCallInfo{
+					ID:   utils.GenerateToolCallID(),
+					Name: xmlTC.Name,
+					Args: xmlTC.Args,
+				}
+				e.sendToolCallLocked(tc)
+			}
+		} else {
+			// 没有工具调用，发送剩余文本
+			e.closeThinkingBlock()
+			e.ensureTextBlock()
+			e.totalOutputTokens += EstimateClaudeTokens(e.textBuffer)
+			e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
+				Type:  "content_block_delta",
+				Index: *e.textBlockIndex,
+				Delta: ClaudeSSEDelta{
+					Type: "text_delta",
+					Text: e.textBuffer,
+				},
+			})
+		}
+		e.textBuffer = ""
+	}
 
 	// 关闭所有打开的块
 	e.closeTextBlock()

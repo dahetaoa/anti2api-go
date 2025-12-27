@@ -43,11 +43,12 @@ type StreamResult struct {
 	// MergedResponse 合并后的响应（text 合并，其他字段透传）
 	MergedResponse map[string]interface{} `json:"-"`
 	// 简化字段用于快速访问
-	Text         string              `json:"-"`
-	Thinking     string              `json:"-"`
-	ToolCalls    []core.ToolCallInfo `json:"-"`
-	FinishReason string              `json:"-"`
-	Usage        *core.UsageMetadata `json:"-"`
+	Text              string              `json:"-"`
+	Thinking          string              `json:"-"`
+	ThinkingSignature string              `json:"-"`
+	ToolCalls         []core.ToolCallInfo `json:"-"`
+	FinishReason      string              `json:"-"`
+	Usage             *core.UsageMetadata `json:"-"`
 }
 
 // ParseStream 解析流式响应
@@ -157,6 +158,9 @@ func ParseStreamWithResult(resp *http.Response, receiver func(data *StreamData) 
 			}
 
 			for _, part := range candidate.Content.Parts {
+				if part.ThoughtSignature != "" {
+					result.ThinkingSignature = part.ThoughtSignature
+				}
 				if part.Thought {
 					thinkingBuilder.WriteString(part.Text)
 				} else if part.Text != "" {
