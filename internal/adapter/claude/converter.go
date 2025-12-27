@@ -88,12 +88,34 @@ func getClaudeProjectID(account *store.Account) string {
 // convertClaudeMessagesToContents 将 Claude 消息转换为 Antigravity contents
 func convertClaudeMessagesToContents(messages []ClaudeMessage, thinkingEnabled bool) []Content {
 	var contents []Content
+	toolIDToName := make(map[string]string)
+
+	// 首先扫描所有消息，建立 tool_use_id 到 tool_name 的映射
+	// 因为 Claude 的 tool_result 块只有 tool_use_id，而 Vertex API 要求 functionResponse 必须有 name
+	for _, msg := range messages {
+		if msg.Role == "assistant" {
+			switch v := msg.Content.(type) {
+			case []interface{}:
+				for _, item := range v {
+					if block, ok := item.(map[string]interface{}); ok {
+						if block["type"] == "tool_use" {
+							id, _ := block["id"].(string)
+							name, _ := block["name"].(string)
+							if id != "" && name != "" {
+								toolIDToName[id] = name
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
 	for _, msg := range messages {
 		role := mapClaudeRoleToAntigravity(msg.Role)
 
 		// 将消息内容转换为 parts
-		parts := convertClaudeContentToParts(msg.Content, thinkingEnabled && msg.Role == "user")
+		parts := convertClaudeContentToParts(msg.Content, thinkingEnabled && msg.Role == "user", toolIDToName)
 
 		if len(parts) > 0 {
 			contents = append(contents, Content{
@@ -115,72 +137,104 @@ func mapClaudeRoleToAntigravity(role string) string {
 }
 
 // convertClaudeContentToParts 将 Claude 内容转换为 Antigravity parts
-func convertClaudeContentToParts(content interface{}, appendThinkingHint bool) []Part {
+func convertClaudeContentToParts(content interface{}, appendThinkingHint bool, toolIDToName map[string]string) []Part {
 	var parts []Part
 
 	switch v := content.(type) {
 	case string:
-		// 移除 invoke 和 tool_result XML 标签（防止重复）
-		textContent := invokeRegex.ReplaceAllString(v, "")
-		textContent = toolResultRegex.ReplaceAllString(textContent, "")
-		if textContent != "" {
-			parts = append(parts, Part{Text: textContent})
+		if v != "" {
+			parts = append(parts, Part{Text: v})
 		}
 	case []interface{}:
 		// 复杂内容块数组
+		var lastSignature string
 		for _, item := range v {
 			if block, ok := item.(map[string]interface{}); ok {
-				blockParts := normalizeClaudeBlockToParts(block)
-				parts = append(parts, blockParts...)
+				blockType, _ := block["type"].(string)
+
+				switch blockType {
+				case "text":
+					text, _ := block["text"].(string)
+					if text != "" {
+						parts = append(parts, Part{Text: text})
+					}
+
+				case "thinking":
+					thinking, _ := block["thinking"].(string)
+					signature, _ := block["signature"].(string)
+					if signature != "" {
+						lastSignature = signature
+					}
+					if thinking != "" {
+						parts = append(parts, Part{
+							Text:             thinking,
+							Thought:          true,
+							ThoughtSignature: signature,
+						})
+					}
+
+				case "tool_use":
+					name, _ := block["name"].(string)
+					id, _ := block["id"].(string)
+					input := block["input"]
+
+					var args map[string]interface{}
+					if m, ok := input.(map[string]interface{}); ok {
+						args = m
+					}
+
+					part := Part{
+						FunctionCall: &FunctionCall{
+							ID:   id,
+							Name: name,
+							Args: args,
+						},
+					}
+
+					// 如果有积累的签名，且这是该组的第一个工具调用，则附带签名
+					if lastSignature != "" {
+						part.ThoughtSignature = lastSignature
+						lastSignature = "" // 消费掉签名
+					}
+
+					parts = append(parts, part)
+
+				case "tool_result":
+					toolUseID, _ := block["tool_use_id"].(string)
+					isError, _ := block["is_error"].(bool)
+					rawContent := block["content"]
+
+					// 提取工具结果内容并尝试解析为 JSON
+					contentStr := extractToolResultContent(rawContent)
+					var response map[string]interface{}
+
+					// 尝试解析为 JSON 对象
+					if err := json.Unmarshal([]byte(contentStr), &response); err != nil {
+						// 如果不是完整的 JSON，则包装在 "result" 或 "error" 字段中
+						response = make(map[string]interface{})
+						if isError {
+							response["error"] = contentStr
+						} else {
+							response["result"] = contentStr
+						}
+					}
+
+					// 从映射中寻找对应的工具名称
+					toolName := toolIDToName[toolUseID]
+
+					parts = append(parts, Part{
+						FunctionResponse: &FunctionResponse{
+							ID:       toolUseID,
+							Name:     toolName, // 填充正确的工具名称
+							Response: response,
+						},
+					})
+				}
 			}
 		}
 	}
 
 	return parts
-}
-
-// normalizeClaudeBlockToParts 将单个 Claude 内容块转换为 Antigravity Part 列表
-func normalizeClaudeBlockToParts(block map[string]interface{}) []Part {
-	blockType, _ := block["type"].(string)
-
-	switch blockType {
-	case "text":
-		text, _ := block["text"].(string)
-		// 移除 invoke 和 tool_result XML 标签
-		result := invokeRegex.ReplaceAllString(text, "")
-		result = toolResultRegex.ReplaceAllString(result, "")
-		if result != "" {
-			return []Part{{Text: result}}
-		}
-
-	case "thinking":
-		thinking, _ := block["thinking"].(string)
-		signature, _ := block["signature"].(string)
-		if thinking != "" {
-			return []Part{{
-				Text:             thinking,
-				Thought:          true,
-				ThoughtSignature: signature, // 将 Claude signature 映射为 Vertex thoughtSignature
-			}}
-		}
-
-	case "tool_result":
-		toolUseID, _ := block["tool_use_id"].(string)
-		content := extractToolResultContent(block["content"])
-		return []Part{{Text: fmt.Sprintf(`<tool_result id="%s">%s</tool_result>`, toolUseID, content)}}
-
-	case "tool_use":
-		name, _ := block["name"].(string)
-		input := block["input"]
-		params := formatToolUseParams(input)
-		return []Part{{Text: fmt.Sprintf("<invoke name=\"%s\">\n%s\n</invoke>", name, params)}}
-
-	case "image":
-		// 图片内容 - 暂时忽略，因为需要特殊处理
-		return nil
-	}
-
-	return nil
 }
 
 // ConvertClaudeToolsToAntigravity 将 Claude 工具定义转换为 Antigravity 格式
