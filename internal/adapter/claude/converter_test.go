@@ -100,7 +100,7 @@ func TestConvertClaudeContentToParts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parts := convertClaudeContentToParts(tt.content, false, toolIDToName)
+			parts := convertClaudeContentToParts(tt.content, toolIDToName)
 			if len(parts) != tt.expected {
 				t.Errorf("Expected %d parts, got %d", tt.expected, len(parts))
 				return

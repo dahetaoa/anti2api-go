@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"sync"
 
 	"anti2api-golang/internal/core"
@@ -52,7 +51,6 @@ type SSEEmitter struct {
 	pendingSignature       string // 待发送的 thinking block signature
 	signatureSent          bool   // 标记 signature 是否已发送
 	lastThinkingBlockIndex *int   // 记录最近一个思考块的索引，用于处理迟到的 signature
-	textBuffer             string // 文本缓冲区，用于检测跨块的 XML 工具调用
 	mu                     sync.Mutex
 	// 用于收集原始 JSON 以便日志记录（透传）
 	collectedEvents []map[string]interface{}
@@ -330,78 +328,10 @@ func (e *SSEEmitter) sendSignatureDeltaLocked(signature string) error {
 }
 
 // sendTextLocked 发送文本增量（内部）
-// 使用缓冲机制检测跨块的 XML 工具调用
 func (e *SSEEmitter) sendTextLocked(text string) error {
 	if text == "" {
 		return nil
 	}
-
-	// 累积文本到缓冲区
-	e.textBuffer += text
-
-	// 检查缓冲区中是否有 XML 工具调用的迹象
-	hasInvokeStart := strings.Contains(e.textBuffer, "<invoke")
-	hasInvokeEnd := strings.Contains(e.textBuffer, "</invoke>")
-
-	// 如果检测到 <invoke 开始标签但没有结束标签，继续缓冲等待完整标签
-	if hasInvokeStart && !hasInvokeEnd {
-		// 继续缓冲，不发送任何内容
-		return nil
-	}
-
-	// 如果有完整的 invoke 标签，解析并处理
-	if hasInvokeStart && hasInvokeEnd {
-		xmlToolCalls, cleanedText := ParseXMLToolCalls(e.textBuffer)
-
-		if len(xmlToolCalls) > 0 {
-			// 清空缓冲区
-			e.textBuffer = ""
-
-			// 确保思考块先关闭
-			if err := e.closeThinkingBlock(); err != nil {
-				return err
-			}
-
-			// 如果有清理后的文本，先发送文本
-			if cleanedText != "" {
-				if err := e.ensureTextBlock(); err != nil {
-					return err
-				}
-				e.totalOutputTokens += EstimateClaudeTokens(cleanedText)
-				if err := e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
-					Type:  "content_block_delta",
-					Index: *e.textBlockIndex,
-					Delta: ClaudeSSEDelta{
-						Type: "text_delta",
-						Text: cleanedText,
-					},
-				}); err != nil {
-					return err
-				}
-				// 关闭文本块为工具调用腾出位置
-				if err := e.closeTextBlock(); err != nil {
-					return err
-				}
-			}
-
-			// 发送所有 XML 工具调用
-			for _, xmlTC := range xmlToolCalls {
-				tc := core.ToolCallInfo{
-					ID:   utils.GenerateToolCallID(),
-					Name: xmlTC.Name,
-					Args: xmlTC.Args,
-				}
-				if err := e.sendToolCallLocked(tc); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-	}
-
-	// 没有 XML 工具调用迹象，正常发送缓冲区内容
-	textToSend := e.textBuffer
-	e.textBuffer = ""
 
 	// 确保思考块先关闭，避免与正文交叉
 	if err := e.closeThinkingBlock(); err != nil {
@@ -412,14 +342,14 @@ func (e *SSEEmitter) sendTextLocked(text string) error {
 		return err
 	}
 
-	e.totalOutputTokens += EstimateClaudeTokens(textToSend)
+	e.totalOutputTokens += EstimateClaudeTokens(text)
 
 	return e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
 		Type:  "content_block_delta",
 		Index: *e.textBlockIndex,
 		Delta: ClaudeSSEDelta{
 			Type: "text_delta",
-			Text: textToSend,
+			Text: text,
 		},
 	})
 }
@@ -526,56 +456,6 @@ func (e *SSEEmitter) Finish(usage *Usage) error {
 		return nil
 	}
 	e.finished = true
-
-	// 刷新缓冲区中剩余的内容（可能包含 XML 工具调用）
-	if e.textBuffer != "" {
-		// 检查是否有 XML 工具调用
-		xmlToolCalls, cleanedText := ParseXMLToolCalls(e.textBuffer)
-
-		if len(xmlToolCalls) > 0 {
-			// 确保思考块先关闭
-			e.closeThinkingBlock()
-
-			// 如果有清理后的文本，先发送文本
-			if cleanedText != "" {
-				e.ensureTextBlock()
-				e.totalOutputTokens += EstimateClaudeTokens(cleanedText)
-				e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
-					Type:  "content_block_delta",
-					Index: *e.textBlockIndex,
-					Delta: ClaudeSSEDelta{
-						Type: "text_delta",
-						Text: cleanedText,
-					},
-				})
-				e.closeTextBlock()
-			}
-
-			// 发送所有 XML 工具调用
-			for _, xmlTC := range xmlToolCalls {
-				tc := core.ToolCallInfo{
-					ID:   utils.GenerateToolCallID(),
-					Name: xmlTC.Name,
-					Args: xmlTC.Args,
-				}
-				e.sendToolCallLocked(tc)
-			}
-		} else {
-			// 没有工具调用，发送剩余文本
-			e.closeThinkingBlock()
-			e.ensureTextBlock()
-			e.totalOutputTokens += EstimateClaudeTokens(e.textBuffer)
-			e.writeSSE("content_block_delta", ClaudeSSEContentBlockDelta{
-				Type:  "content_block_delta",
-				Index: *e.textBlockIndex,
-				Delta: ClaudeSSEDelta{
-					Type: "text_delta",
-					Text: e.textBuffer,
-				},
-			})
-		}
-		e.textBuffer = ""
-	}
 
 	// 关闭所有打开的块
 	e.closeTextBlock()

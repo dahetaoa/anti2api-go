@@ -3,18 +3,11 @@ package claude
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"anti2api-golang/internal/config"
 	"anti2api-golang/internal/store"
 	"anti2api-golang/internal/utils"
-)
-
-// Claude thinking 相关常量
-const (
-	ThinkingStartTag = "<thinking>"
-	ThinkingEndTag   = "</thinking>"
 )
 
 // ConvertClaudeToAntigravity 将 Claude 请求直接转换为 Antigravity 格式（跳过 OpenAI 中间层）
@@ -115,7 +108,7 @@ func convertClaudeMessagesToContents(messages []ClaudeMessage, thinkingEnabled b
 		role := mapClaudeRoleToAntigravity(msg.Role)
 
 		// 将消息内容转换为 parts
-		parts := convertClaudeContentToParts(msg.Content, thinkingEnabled && msg.Role == "user", toolIDToName)
+		parts := convertClaudeContentToParts(msg.Content, toolIDToName)
 
 		if len(parts) > 0 {
 			contents = append(contents, Content{
@@ -137,7 +130,7 @@ func mapClaudeRoleToAntigravity(role string) string {
 }
 
 // convertClaudeContentToParts 将 Claude 内容转换为 Antigravity parts
-func convertClaudeContentToParts(content interface{}, appendThinkingHint bool, toolIDToName map[string]string) []Part {
+func convertClaudeContentToParts(content interface{}, toolIDToName map[string]string) []Part {
 	var parts []Part
 
 	switch v := content.(type) {
@@ -364,69 +357,31 @@ func ConvertAntigravityToClaudeResponse(resp *AntigravityResponse, requestID, mo
 	}
 }
 
-// 正则表达式
-var (
-	invokeRegex     = regexp.MustCompile(`(?i)<invoke\b[^>]*>[\s\S]*?</invoke>`)
-	toolResultRegex = regexp.MustCompile(`(?i)<tool_result\b[^>]*>[\s\S]*?</tool_result>`)
-	// 用于解析 invoke 标签的正则
-	invokeNameRegex = regexp.MustCompile(`(?i)<invoke\s+name="([^"]+)"`)
-	parameterRegex  = regexp.MustCompile(`(?i)<parameter\s+name="([^"]+)">([\s\S]*?)</parameter>`)
-)
+// BuildClaudeContentBlocksWithThinking 构建 Claude 响应内容块（包含 thinking）
+func BuildClaudeContentBlocksWithThinking(thinking, content string, toolCalls []ToolCallInfo, thinkingSignature string) []ClaudeContentBlock {
+	var blocks []ClaudeContentBlock
 
-// XMLToolCall 表示从文本中解析出的 XML 格式工具调用
-type XMLToolCall struct {
-	Name string
-	Args map[string]interface{}
-}
-
-// ParseXMLToolCalls 从文本中解析 XML 格式的工具调用
-// 返回解析出的工具调用列表和清理后的文本（移除已解析的 invoke 标签）
-func ParseXMLToolCalls(text string) ([]XMLToolCall, string) {
-	var toolCalls []XMLToolCall
-
-	// 查找所有 invoke 标签
-	matches := invokeRegex.FindAllString(text, -1)
-	if len(matches) == 0 {
-		return nil, text
-	}
-
-	for _, match := range matches {
-		// 提取工具名称
-		nameMatch := invokeNameRegex.FindStringSubmatch(match)
-		if len(nameMatch) < 2 {
-			continue
-		}
-		toolName := nameMatch[1]
-
-		// 提取参数
-		args := make(map[string]interface{})
-		paramMatches := parameterRegex.FindAllStringSubmatch(match, -1)
-		for _, pm := range paramMatches {
-			if len(pm) >= 3 {
-				paramName := pm[1]
-				paramValue := strings.TrimSpace(pm[2])
-				// 尝试解析为 JSON，如果失败则作为字符串
-				var jsonValue interface{}
-				if err := json.Unmarshal([]byte(paramValue), &jsonValue); err == nil {
-					args[paramName] = jsonValue
-				} else {
-					args[paramName] = paramValue
-				}
-			}
-		}
-
-		toolCalls = append(toolCalls, XMLToolCall{
-			Name: toolName,
-			Args: args,
+	// thinking 块必须在 text 块之前
+	if thinking != "" {
+		blocks = append(blocks, ClaudeContentBlock{
+			Type:      "thinking",
+			Thinking:  thinking,
+			Signature: thinkingSignature,
 		})
 	}
 
-	// 从文本中移除已解析的 invoke 标签
-	cleanedText := invokeRegex.ReplaceAllString(text, "")
-	// 清理多余的空行
-	cleanedText = strings.TrimSpace(cleanedText)
+	if content != "" {
+		blocks = append(blocks, ClaudeContentBlock{
+			Type: "text",
+			Text: content,
+		})
+	}
 
-	return toolCalls, cleanedText
+	if len(toolCalls) > 0 {
+		blocks = append(blocks, ConvertToolCallsToClaudeBlocks(toolCalls)...)
+	}
+
+	return blocks
 }
 
 // extractClaudeSystem 提取 Claude system 内容
@@ -469,32 +424,6 @@ func extractToolResultContent(content interface{}) string {
 	return ""
 }
 
-// formatToolUseParams 格式化工具调用参数为 XML
-func formatToolUseParams(input interface{}) string {
-	if input == nil {
-		return ""
-	}
-
-	inputMap, ok := input.(map[string]interface{})
-	if !ok {
-		return ""
-	}
-
-	var params []string
-	for key, value := range inputMap {
-		var stringValue string
-		switch v := value.(type) {
-		case string:
-			stringValue = v
-		default:
-			jsonBytes, _ := json.Marshal(v)
-			stringValue = string(jsonBytes)
-		}
-		params = append(params, fmt.Sprintf(`<parameter name="%s">%s</parameter>`, key, stringValue))
-	}
-	return strings.Join(params, "\n")
-}
-
 // ConvertToolCallsToClaudeBlocks 将工具调用转换为 Claude 内容块
 func ConvertToolCallsToClaudeBlocks(toolCalls []ToolCallInfo) []ClaudeContentBlock {
 	if len(toolCalls) == 0 {
@@ -526,33 +455,6 @@ func ConvertToolCallsToClaudeBlocks(toolCalls []ToolCallInfo) []ClaudeContentBlo
 // BuildClaudeContentBlocks 构建 Claude 响应内容块
 func BuildClaudeContentBlocks(content string, toolCalls []ToolCallInfo) []ClaudeContentBlock {
 	return BuildClaudeContentBlocksWithThinking("", content, toolCalls, "")
-}
-
-// BuildClaudeContentBlocksWithThinking 构建 Claude 响应内容块（包含 thinking）
-func BuildClaudeContentBlocksWithThinking(thinking, content string, toolCalls []ToolCallInfo, thinkingSignature string) []ClaudeContentBlock {
-	var blocks []ClaudeContentBlock
-
-	// thinking 块必须在 text 块之前
-	if thinking != "" {
-		blocks = append(blocks, ClaudeContentBlock{
-			Type:      "thinking",
-			Thinking:  thinking,
-			Signature: thinkingSignature,
-		})
-	}
-
-	if content != "" {
-		blocks = append(blocks, ClaudeContentBlock{
-			Type: "text",
-			Text: content,
-		})
-	}
-
-	if len(toolCalls) > 0 {
-		blocks = append(blocks, ConvertToolCallsToClaudeBlocks(toolCalls)...)
-	}
-
-	return blocks
 }
 
 // EstimateClaudeTokens 估算 token 数量
@@ -622,12 +524,10 @@ func extractClaudeMessageText(content interface{}) string {
 					}
 				case "tool_use":
 					name, _ := block["name"].(string)
-					inputJSON, _ := json.Marshal(block["input"])
-					texts = append(texts, fmt.Sprintf(`<invoke name="%s">%s</invoke>`, name, string(inputJSON)))
+					texts = append(texts, name)
 				case "tool_result":
-					toolUseID, _ := block["tool_use_id"].(string)
 					content := extractToolResultContent(block["content"])
-					texts = append(texts, fmt.Sprintf(`<tool_result id="%s">%s</tool_result>`, toolUseID, content))
+					texts = append(texts, content)
 				}
 			}
 		}
