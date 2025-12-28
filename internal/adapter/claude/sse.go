@@ -1,10 +1,11 @@
 package claude
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
+
+	"github.com/bytedance/sonic"
 
 	"anti2api-golang/internal/core"
 	"anti2api-golang/internal/utils"
@@ -188,14 +189,14 @@ func (e *SSEEmitter) ProcessPart(part StreamDataPart) error {
 
 // writeSSE 写入 SSE 事件并收集原始 JSON
 func (e *SSEEmitter) writeSSE(event string, data interface{}) error {
-	jsonData, err := json.Marshal(data)
+	jsonData, err := sonic.Marshal(data)
 	if err != nil {
 		return err
 	}
 
 	// 收集原始 JSON 用于日志透传
 	var eventData map[string]interface{}
-	if err := json.Unmarshal(jsonData, &eventData); err == nil {
+	if err := sonic.Unmarshal(jsonData, &eventData); err == nil {
 		e.collectedEvents = append(e.collectedEvents, eventData)
 	}
 
@@ -397,7 +398,7 @@ func (e *SSEEmitter) sendToolCallLocked(tc core.ToolCallInfo) error {
 	e.nextIndex++
 
 	// 序列化 args
-	argsJSON, _ := json.Marshal(tc.Args)
+	argsJSON, _ := sonic.Marshal(tc.Args)
 	args := string(argsJSON)
 	if args == "" || args == "null" {
 		args = "{}"

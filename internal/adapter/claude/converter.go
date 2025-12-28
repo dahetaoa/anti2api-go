@@ -1,9 +1,10 @@
 package claude
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/bytedance/sonic"
 
 	"anti2api-golang/internal/config"
 	"anti2api-golang/internal/store"
@@ -127,8 +128,10 @@ func mapClaudeRoleToAntigravity(role string) string {
 }
 
 // convertClaudeContentToParts 将 Claude 内容转换为 Antigravity parts
+// 签名处理：从 thinking 块提取签名，根据内容类型决定放置位置（functionCall > text > thinking）
 func convertClaudeContentToParts(content interface{}, toolIDToName map[string]string) []Part {
 	var parts []Part
+	var thinkingSignature string // 从 thinking 块提取的签名
 
 	switch v := content.(type) {
 	case string:
@@ -136,8 +139,7 @@ func convertClaudeContentToParts(content interface{}, toolIDToName map[string]st
 			parts = append(parts, Part{Text: v})
 		}
 	case []interface{}:
-		// 复杂内容块数组
-		var lastSignature string
+		// 第一阶段：解析所有内容块，提取签名
 		for _, item := range v {
 			if block, ok := item.(map[string]interface{}); ok {
 				blockType, _ := block["type"].(string)
@@ -152,14 +154,15 @@ func convertClaudeContentToParts(content interface{}, toolIDToName map[string]st
 				case "thinking":
 					thinking, _ := block["thinking"].(string)
 					signature, _ := block["signature"].(string)
-					if signature != "" {
-						lastSignature = signature
+					// 只取第一个非空签名
+					if signature != "" && thinkingSignature == "" {
+						thinkingSignature = signature
 					}
 					if thinking != "" {
 						parts = append(parts, Part{
-							Text:             thinking,
-							Thought:          true,
-							ThoughtSignature: signature,
+							Text:    thinking,
+							Thought: true,
+							// 不在这里放签名，稍后统一决定位置
 						})
 					}
 
@@ -173,21 +176,13 @@ func convertClaudeContentToParts(content interface{}, toolIDToName map[string]st
 						args = m
 					}
 
-					part := Part{
+					parts = append(parts, Part{
 						FunctionCall: &FunctionCall{
 							ID:   id,
 							Name: name,
 							Args: args,
 						},
-					}
-
-					// 如果有积累的签名，且这是该组的第一个工具调用，则附带签名
-					if lastSignature != "" {
-						part.ThoughtSignature = lastSignature
-						lastSignature = "" // 消费掉签名
-					}
-
-					parts = append(parts, part)
+					})
 
 				case "tool_result":
 					toolUseID, _ := block["tool_use_id"].(string)
@@ -198,8 +193,8 @@ func convertClaudeContentToParts(content interface{}, toolIDToName map[string]st
 					contentStr := extractToolResultContent(rawContent)
 					var response map[string]interface{}
 
-					// 尝试解析为 JSON 对象
-					if err := json.Unmarshal([]byte(contentStr), &response); err != nil {
+					// 使用 Sonic 解析 JSON
+					if err := sonic.UnmarshalString(contentStr, &response); err != nil {
 						// 如果不是完整的 JSON，则包装在 "result" 或 "error" 字段中
 						response = make(map[string]interface{})
 						if isError {
@@ -215,16 +210,48 @@ func convertClaudeContentToParts(content interface{}, toolIDToName map[string]st
 					parts = append(parts, Part{
 						FunctionResponse: &FunctionResponse{
 							ID:       toolUseID,
-							Name:     toolName, // 填充正确的工具名称
+							Name:     toolName,
 							Response: response,
 						},
 					})
 				}
 			}
 		}
+
+		// 第二阶段：根据内容类型决定签名放置位置（只放一处）
+		if thinkingSignature != "" {
+			applySignatureToParts(parts, thinkingSignature)
+		}
 	}
 
 	return parts
+}
+
+// applySignatureToParts 根据内容类型决定签名放置位置
+// 优先级：functionCall > text > thinking
+// 确保单轮对话中只有一个 Part 携带 thoughtSignature
+func applySignatureToParts(parts []Part, signature string) {
+	// 优先级 1: 有 functionCall → 放在第一个 functionCall
+	for i := range parts {
+		if parts[i].FunctionCall != nil {
+			parts[i].ThoughtSignature = signature
+			return
+		}
+	}
+	// 优先级 2: 纯文本 → 放在最后一个非 thinking 的 text
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i].Text != "" && !parts[i].Thought {
+			parts[i].ThoughtSignature = signature
+			return
+		}
+	}
+	// 优先级 3: 只有 thinking → 放在最后一个 thinking
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i].Thought {
+			parts[i].ThoughtSignature = signature
+			return
+		}
+	}
 }
 
 // ConvertClaudeToolsToAntigravity 将 Claude 工具定义转换为 Antigravity 格式
@@ -503,7 +530,7 @@ func CountClaudeTokens(req *ClaudeMessagesRequest) (*ClaudeTokenCountResponse, e
 
 	// 提取工具定义
 	if len(req.Tools) > 0 {
-		toolsJSON, _ := json.Marshal(req.Tools)
+		toolsJSON, _ := sonic.Marshal(req.Tools)
 		totalText += string(toolsJSON)
 	}
 

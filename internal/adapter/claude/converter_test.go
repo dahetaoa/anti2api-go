@@ -42,15 +42,18 @@ func TestConvertClaudeContentToParts(t *testing.T) {
 			},
 			expected: 2,
 			verify: func(t *testing.T, parts []Part) {
-				// Part 0: Thinking
-				if parts[0].Text != "I should call a tool" || !parts[0].Thought || parts[0].ThoughtSignature != "sig123" {
+				// Part 0: Thinking (无签名，签名已移至 functionCall)
+				if parts[0].Text != "I should call a tool" || !parts[0].Thought {
 					t.Errorf("Thinking part mismatch: %+v", parts[0])
 				}
-				// Part 1: Tool Use
+				if parts[0].ThoughtSignature != "" {
+					t.Errorf("Expected no signature on thinking part, got %s", parts[0].ThoughtSignature)
+				}
+				// Part 1: Tool Use (签名在这里)
 				if parts[1].FunctionCall == nil || parts[1].FunctionCall.Name != "get_weather" || parts[1].FunctionCall.ID != "tool_1" {
 					t.Errorf("Tool use part mismatch: %+v", parts[1])
 				}
-				// Signature should be attached to the tool call part if it's the first one after thinking
+				// 签名应在 functionCall 上
 				if parts[1].ThoughtSignature != "sig123" {
 					t.Errorf("Expected signature sig123 on tool call, got %s", parts[1].ThoughtSignature)
 				}
@@ -91,6 +94,63 @@ func TestConvertClaudeContentToParts(t *testing.T) {
 			verify: func(t *testing.T, parts []Part) {
 				if parts[0].FunctionResponse == nil || parts[0].FunctionResponse.Response["result"] != "Success" {
 					t.Errorf("Expected result 'Success', got %+v", parts[0].FunctionResponse.Response)
+				}
+			},
+		},
+		{
+			name: "Thinking + Text (signature on text)",
+			content: []interface{}{
+				map[string]interface{}{
+					"type":      "thinking",
+					"thinking":  "Let me think...",
+					"signature": "sig_text_123",
+				},
+				map[string]interface{}{
+					"type": "text",
+					"text": "Here is my answer",
+				},
+			},
+			expected: 2,
+			verify: func(t *testing.T, parts []Part) {
+				// Part 0: Thinking (无签名)
+				if parts[0].ThoughtSignature != "" {
+					t.Errorf("Expected no signature on thinking, got %s", parts[0].ThoughtSignature)
+				}
+				// Part 1: Text (签名在这里)
+				if parts[1].ThoughtSignature != "sig_text_123" {
+					t.Errorf("Expected signature sig_text_123 on text, got %s", parts[1].ThoughtSignature)
+				}
+			},
+		},
+		{
+			name: "Parallel Tool Calls (signature on first only)",
+			content: []interface{}{
+				map[string]interface{}{
+					"type":      "thinking",
+					"thinking":  "I need to call two tools",
+					"signature": "sig_parallel",
+				},
+				map[string]interface{}{
+					"type":  "tool_use",
+					"id":    "tool_a",
+					"name":  "get_weather",
+					"input": map[string]interface{}{"city": "Paris"},
+				},
+				map[string]interface{}{
+					"type":  "tool_use",
+					"id":    "tool_b",
+					"name":  "get_weather",
+					"input": map[string]interface{}{"city": "London"},
+				},
+			},
+			expected: 3,
+			verify: func(t *testing.T, parts []Part) {
+				// 只有第一个 functionCall 有签名
+				if parts[1].ThoughtSignature != "sig_parallel" {
+					t.Errorf("Expected signature on first tool call, got %s", parts[1].ThoughtSignature)
+				}
+				if parts[2].ThoughtSignature != "" {
+					t.Errorf("Expected no signature on second tool call, got %s", parts[2].ThoughtSignature)
 				}
 			},
 		},
