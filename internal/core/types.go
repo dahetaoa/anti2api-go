@@ -99,8 +99,9 @@ type GenerationConfig struct {
 
 // ThinkingConfig 思考配置
 type ThinkingConfig struct {
-	IncludeThoughts bool `json:"includeThoughts"`
-	ThinkingBudget  int  `json:"thinkingBudget,omitempty"`
+	IncludeThoughts bool   `json:"includeThoughts"`
+	ThinkingBudget  int    `json:"thinkingBudget,omitempty"`
+	ThinkingLevel   string `json:"thinking_level,omitempty"`
 }
 
 // ==================== Antigravity 响应格式 ====================

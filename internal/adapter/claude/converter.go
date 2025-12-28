@@ -274,6 +274,22 @@ func buildClaudeGenerationConfig(req *ClaudeMessagesRequest, modelName string) *
 	// thinking 配置
 	if ShouldEnableThinking(modelName, nil) {
 		cfg.ThinkingConfig = BuildThinkingConfig(modelName)
+
+		// 如果请求中显式提供了 thinking 配置，尝试合并
+		if req.Thinking != nil && req.Thinking.Type == "enabled" {
+			if req.Thinking.Budget > 0 {
+				cfg.ThinkingConfig.ThinkingBudget = req.Thinking.Budget
+			}
+			if req.Thinking.Level != "" {
+				cfg.ThinkingConfig.ThinkingLevel = req.Thinking.Level
+			}
+		}
+
+		// 针对 Gemini 3 模型的特殊处理：强制使用 thinking_level = high
+		if strings.HasPrefix(modelName, "gemini-3-pro-") {
+			cfg.ThinkingConfig.ThinkingLevel = "high"
+			cfg.ThinkingConfig.ThinkingBudget = 0 // 使用 level 时清空 budget
+		}
 	}
 
 	return cfg

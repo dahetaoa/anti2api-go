@@ -91,8 +91,11 @@ func BuildThinkingConfig(modelName string) *ThinkingConfig {
 	actualModel := ResolveModelName(modelName)
 
 	if strings.HasPrefix(actualModel, "gemini-3-pro-") {
-		// Gemini 3 Pro：不传 thinkingBudget，让后端决定
-		return &ThinkingConfig{IncludeThoughts: true}
+		// Gemini 3 Pro：使用 thinking_level 控制思考程度
+		return &ThinkingConfig{
+			IncludeThoughts: true,
+			ThinkingLevel:   "high",
+		}
 	}
 
 	if IsClaudeModel(actualModel) {

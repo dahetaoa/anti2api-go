@@ -158,8 +158,9 @@ type ClaudeTool struct {
 
 // ClaudeThinking Claude 思考配置
 type ClaudeThinking struct {
-	Type   string `json:"type"`             // enabled, disabled
-	Budget int    `json:"budget,omitempty"` // thinking token budget
+	Type   string `json:"type"`                   // enabled, disabled
+	Budget int    `json:"budget,omitempty"`         // thinking token budget
+	Level  string `json:"thinking_level,omitempty"` // thinking level
 }
 
 // ClaudeMetadata Claude 元数据
