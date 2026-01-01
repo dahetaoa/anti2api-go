@@ -95,13 +95,18 @@ func convertMessages(messages []OpenAIMessage) []Content {
 			// 转换工具调用
 			for _, tc := range msg.ToolCalls {
 				args := ParseArgs(tc.Function.Arguments)
+				var signature string
+				if tc.ExtraContent != nil && tc.ExtraContent.Google != nil {
+					signature = tc.ExtraContent.Google.ThoughtSignature
+				}
+
 				parts = append(parts, Part{
 					FunctionCall: &FunctionCall{
 						ID:   tc.ID,
 						Name: tc.Function.Name,
 						Args: args,
 					},
-					ThoughtSignature: tc.ThoughtSignature,
+					ThoughtSignature: signature,
 				})
 			}
 			if len(parts) > 0 {
@@ -297,8 +302,6 @@ func buildGenerationConfig(req *OpenAIChatRequest, modelName string) *Generation
 	}
 
 	// 思考模式
-	// 注意：Gemini 模型即使有历史工具调用也可以启用 thinking，
-	// 因为我们已经实现了 thoughtSignature 缓存机制来恢复签名
 	if ShouldEnableThinking(modelName, nil) {
 		config.ThinkingConfig = BuildThinkingConfig(modelName)
 	}
@@ -325,6 +328,16 @@ func ConvertToOpenAIResponse(antigravityResp *AntigravityResponse, model string)
 			if id == "" {
 				id = utils.GenerateToolCallID()
 			}
+
+			var extraContent *ExtraContent
+			if part.ThoughtSignature != "" {
+				extraContent = &ExtraContent{
+					Google: &GoogleExtra{
+						ThoughtSignature: part.ThoughtSignature,
+					},
+				}
+			}
+
 			toolCalls = append(toolCalls, OpenAIToolCall{
 				ID:   id,
 				Type: "function",
@@ -332,7 +345,7 @@ func ConvertToOpenAIResponse(antigravityResp *AntigravityResponse, model string)
 					Name:      part.FunctionCall.Name,
 					Arguments: string(argsJSON),
 				},
-				ThoughtSignature: part.ThoughtSignature,
+				ExtraContent: extraContent,
 			})
 		} else if part.InlineData != nil {
 			dataURL := fmt.Sprintf("data:%s;base64,%s", part.InlineData.MimeType, part.InlineData.Data)

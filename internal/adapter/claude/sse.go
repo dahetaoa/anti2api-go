@@ -243,12 +243,9 @@ func (e *SSEEmitter) ensureTextBlock() error {
 	e.textBlockIndex = &index
 
 	return e.writeSSE("content_block_start", ClaudeSSEContentBlockStart{
-		Type:  "content_block_start",
-		Index: index,
-		ContentBlock: ClaudeSSEContentBlock{
-			Type: "text",
-			Text: "",
-		},
+		Type:         "content_block_start",
+		Index:        index,
+		ContentBlock: NewTextContentBlock(),
 	})
 }
 
@@ -264,12 +261,9 @@ func (e *SSEEmitter) ensureThinkingBlock() error {
 	e.signatureSent = false           // 新块开始，重置标志
 
 	return e.writeSSE("content_block_start", ClaudeSSEContentBlockStart{
-		Type:  "content_block_start",
-		Index: index,
-		ContentBlock: ClaudeSSEContentBlock{
-			Type:     "thinking",
-			Thinking: "",
-		},
+		Type:         "content_block_start",
+		Index:        index,
+		ContentBlock: NewThinkingContentBlock(),
 	})
 }
 
@@ -408,14 +402,9 @@ func (e *SSEEmitter) sendToolCallLocked(tc core.ToolCallInfo) error {
 
 	// content_block_start
 	if err := e.writeSSE("content_block_start", ClaudeSSEContentBlockStart{
-		Type:  "content_block_start",
-		Index: index,
-		ContentBlock: ClaudeSSEContentBlock{
-			Type:  "tool_use",
-			ID:    tc.ID,
-			Name:  tc.Name,
-			Input: map[string]interface{}{},
-		},
+		Type:         "content_block_start",
+		Index:        index,
+		ContentBlock: NewToolUseContentBlock(tc.ID, tc.Name),
 	}); err != nil {
 		return err
 	}

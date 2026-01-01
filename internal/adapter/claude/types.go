@@ -216,20 +216,38 @@ type ClaudeSSEMessagePayload struct {
 }
 
 // ClaudeSSEContentBlockStart content_block_start 事件
+// ContentBlock 使用 map[string]interface{} 以确保可以精确控制序列化，
+// 包括空字符串的显式包含（Claude API 规范要求）
 type ClaudeSSEContentBlockStart struct {
-	Type         string                `json:"type"` // content_block_start
-	Index        int                   `json:"index"`
-	ContentBlock ClaudeSSEContentBlock `json:"content_block"`
+	Type         string                 `json:"type"` // content_block_start
+	Index        int                    `json:"index"`
+	ContentBlock map[string]interface{} `json:"content_block"`
 }
 
-// ClaudeSSEContentBlock 内容块启动负载
-type ClaudeSSEContentBlock struct {
-	Type     string      `json:"type"`               // text, thinking, tool_use
-	Text     string      `json:"text,omitempty"`     // type=text
-	Thinking string      `json:"thinking,omitempty"` // type=thinking
-	ID       string      `json:"id,omitempty"`       // type=tool_use
-	Name     string      `json:"name,omitempty"`     // type=tool_use
-	Input    interface{} `json:"input,omitempty"`    // type=tool_use (空对象)
+// NewTextContentBlock 创建文本内容块（包含 text: ""）
+func NewTextContentBlock() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "text",
+		"text": "",
+	}
+}
+
+// NewThinkingContentBlock 创建思考内容块（包含 thinking: ""）
+func NewThinkingContentBlock() map[string]interface{} {
+	return map[string]interface{}{
+		"type":     "thinking",
+		"thinking": "",
+	}
+}
+
+// NewToolUseContentBlock 创建工具调用内容块
+func NewToolUseContentBlock(id, name string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":  "tool_use",
+		"id":    id,
+		"name":  name,
+		"input": map[string]interface{}{},
+	}
 }
 
 // ClaudeSSEContentBlockDelta content_block_delta 事件

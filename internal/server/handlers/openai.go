@@ -330,11 +330,15 @@ func handleBypassStream(w http.ResponseWriter, r *http.Request, req *openai.Open
 			// 转换为 core.ToolCallInfo 格式
 			coreToolCalls := make([]core.ToolCallInfo, len(msg.ToolCalls))
 			for i, tc := range msg.ToolCalls {
+				var signature string
+				if tc.ExtraContent != nil && tc.ExtraContent.Google != nil {
+					signature = tc.ExtraContent.Google.ThoughtSignature
+				}
 				coreToolCalls[i] = core.ToolCallInfo{
 					ID:               tc.ID,
 					Name:             tc.Function.Name,
 					Args:             openai.ParseArgs(tc.Function.Arguments),
-					ThoughtSignature: tc.ThoughtSignature,
+					ThoughtSignature: signature,
 				}
 			}
 			streamWriter.WriteToolCalls(coreToolCalls)

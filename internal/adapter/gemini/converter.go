@@ -61,24 +61,42 @@ func buildGeminiGenerationConfig(reqConfig *GenerationConfig, modelName string) 
 		config.ThinkingConfig = BuildThinkingConfig(modelName)
 	}
 
+	// 确保在启用思考模式时设置并校验 maxOutputTokens
+	if config.ThinkingConfig != nil && config.ThinkingConfig.IncludeThoughts {
+		// 1. 如果没有设置 MaxOutputTokens，提供默认值
+		if config.MaxOutputTokens <= 0 {
+			if IsClaudeModel(modelName) {
+				config.MaxOutputTokens = GetClaudeMaxOutputTokens(modelName)
+			} else {
+				// Gemini 等其他模型，默认给一个足够大的值或基于 budget
+				if config.ThinkingConfig.ThinkingBudget > 0 {
+					config.MaxOutputTokens = config.ThinkingConfig.ThinkingBudget + 4096
+				} else {
+					config.MaxOutputTokens = 8192
+				}
+			}
+		}
+
+		// 2. 校验 MaxOutputTokens 必须大于 ThinkingBudget (针对 Anthropic/Claude 逻辑)
+		if config.ThinkingConfig.ThinkingBudget > 0 && config.MaxOutputTokens <= config.ThinkingConfig.ThinkingBudget {
+			config.MaxOutputTokens = config.ThinkingConfig.ThinkingBudget + 4096
+		}
+	}
+
 	return config
 }
 
-// sanitizeRequestContents 清洗请求内容，处理空 Part、补充工具名称和签名
+// sanitizeRequestContents 清洗请求内容，处理空 Part、补充工具名称
 func sanitizeRequestContents(contents []Content) []Content {
 	if len(contents) == 0 {
 		return contents
 	}
 
 	toolIDToName := make(map[string]string)
-	var lastSignature string
 
-	// 1. 扫描历史，建立映射并找回签名
+	// 1. 扫描历史，建立工具 ID 到名称的映射
 	for _, content := range contents {
 		for _, part := range content.Parts {
-			if part.ThoughtSignature != "" {
-				lastSignature = part.ThoughtSignature
-			}
 			if part.FunctionCall != nil {
 				if part.FunctionCall.ID != "" && part.FunctionCall.Name != "" {
 					toolIDToName[part.FunctionCall.ID] = part.FunctionCall.Name
@@ -93,7 +111,7 @@ func sanitizeRequestContents(contents []Content) []Content {
 		newParts := make([]Part, 0, len(content.Parts))
 		for _, part := range content.Parts {
 			// 剔除空 Part (既没有 Text 也没有其他有效载荷)
-			if part.Text == "" && part.FunctionCall == nil && part.FunctionResponse == nil && part.InlineData == nil && !part.Thought {
+			if part.Text == "" && part.FunctionCall == nil && part.FunctionResponse == nil && part.InlineData == nil && !part.Thought && part.ThoughtSignature == "" {
 				continue
 			}
 
@@ -104,10 +122,8 @@ func sanitizeRequestContents(contents []Content) []Content {
 				}
 			}
 
-			// 尝试恢复丢失的 ThoughtSignature (针对 Gemini 3 Thinking 模型)
-			if part.FunctionCall != nil && part.FunctionCall.ID != "" && part.ThoughtSignature == "" {
-				part.ThoughtSignature = lastSignature
-			}
+			// 注意：不再尝试"恢复"丢失的签名，签名应由调用方正确放置
+			// 签名的放置逻辑已移至各 adapter 的请求转换函数
 
 			newParts = append(newParts, part)
 		}

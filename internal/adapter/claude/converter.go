@@ -47,8 +47,23 @@ func ConvertClaudeToAntigravity(req *ClaudeMessagesRequest, account *store.Accou
 		}
 	}
 
+	// 检查是否为 Prefill 请求（最后一条消息是 assistant）
+	isPrefill := false
+	if len(req.Messages) > 0 {
+		lastMsg := req.Messages[len(req.Messages)-1]
+		if lastMsg.Role == "assistant" {
+			isPrefill = true
+		}
+	}
+
+	// 检测是否启用 thinking 模式
+	// 注意：如果是 Prefill 请求，强制禁用 thinking，因为 prefill 的文本（如 "{"）会导致
+	// "Expected thinking but found text" 错误，且无法在 prefill 文本前插入有效的 thinking 块
+	thinkingEnabled := !isPrefill && (ShouldEnableThinking(modelName, nil) ||
+		(req.Thinking != nil && req.Thinking.Type == "enabled"))
+
 	// 转换消息为 Antigravity contents 格式
-	contents := convertClaudeMessagesToContents(req.Messages)
+	contents := convertClaudeMessagesToContents(req.Messages, thinkingEnabled)
 	innerReq.Contents = contents
 
 	// 转换工具
@@ -63,6 +78,13 @@ func ConvertClaudeToAntigravity(req *ClaudeMessagesRequest, account *store.Accou
 
 	// 构建生成配置
 	innerReq.GenerationConfig = buildClaudeGenerationConfig(req, modelName)
+	// 如果强制禁用了 thinking（由于 prefill），需要同步更新 generationConfig
+	if isPrefill && innerReq.GenerationConfig.ThinkingConfig != nil {
+		innerReq.GenerationConfig.ThinkingConfig.IncludeThoughts = false
+		innerReq.GenerationConfig.ThinkingConfig.ThinkingBudget = 0
+		// 恢复 ThinkingLevel 默认值或清空，避免 Vertex AI 报错
+		innerReq.GenerationConfig.ThinkingConfig.ThinkingLevel = ""
+	}
 
 	antigravityReq.Request = innerReq
 	return antigravityReq, nil
@@ -77,7 +99,8 @@ func getClaudeProjectID(account *store.Account) string {
 }
 
 // convertClaudeMessagesToContents 将 Claude 消息转换为 Antigravity contents
-func convertClaudeMessagesToContents(messages []ClaudeMessage) []Content {
+// thinkingEnabled 参数指示是否启用了 thinking 模式
+func convertClaudeMessagesToContents(messages []ClaudeMessage, thinkingEnabled bool) []Content {
 	var contents []Content
 	toolIDToName := make(map[string]string)
 
@@ -108,6 +131,11 @@ func convertClaudeMessagesToContents(messages []ClaudeMessage) []Content {
 		// 将消息内容转换为 parts
 		parts := convertClaudeContentToParts(msg.Content, toolIDToName)
 
+		// 如果启用了 thinking 模式，确保 assistant 消息以 thinking 块开头
+		if thinkingEnabled && msg.Role == "assistant" && len(parts) > 0 {
+			parts = ensureAssistantHasThinking(parts)
+		}
+
 		if len(parts) > 0 {
 			contents = append(contents, Content{
 				Role:  role,
@@ -117,6 +145,28 @@ func convertClaudeMessagesToContents(messages []ClaudeMessage) []Content {
 	}
 
 	return contents
+}
+
+// ensureAssistantHasThinking 确保 assistant 消息以 thinking 块开头
+// 如果第一个 part 不是 thinking 类型，则添加一个占位 thinking 块
+func ensureAssistantHasThinking(parts []Part) []Part {
+	if len(parts) == 0 {
+		return parts
+	}
+
+	// 检查第一个 part 是否是 thinking
+	if parts[0].Thought {
+		return parts // 已经有 thinking 块，无需修改
+	}
+
+	// 在开头插入一个占位的 thinking 块
+	// 使用空字符串内容，表示 thinking 内容已被处理/编辑
+	thinkingPart := Part{
+		Text:    "[Thinking content from previous turn]",
+		Thought: true,
+	}
+
+	return append([]Part{thinkingPart}, parts...)
 }
 
 // mapClaudeRoleToAntigravity 将 Claude 角色映射为 Antigravity 角色
@@ -262,9 +312,10 @@ func ConvertClaudeToolsToAntigravity(tools []ClaudeTool) []Tool {
 
 	var result []Tool
 	for _, tool := range tools {
-		params := tool.InputSchema
-		// 移除 $schema 字段
-		delete(params, "$schema")
+		// 深拷贝 schema 以避免修改原始数据
+		params := deepCopyMap(tool.InputSchema)
+		// 递归清理 Vertex AI 不支持的 JSON Schema 字段
+		cleanSchemaForVertexAI(params)
 
 		result = append(result, Tool{
 			FunctionDeclarations: []FunctionDeclaration{{
@@ -273,6 +324,125 @@ func ConvertClaudeToolsToAntigravity(tools []ClaudeTool) []Tool {
 				Parameters:  params,
 			}},
 		})
+	}
+	return result
+}
+
+// cleanSchemaForVertexAI 递归清理 Vertex AI 不支持的 JSON Schema 字段
+// 同时将 exclusiveMinimum/exclusiveMaximum 转换为 minimum/maximum
+func cleanSchemaForVertexAI(schema map[string]interface{}) {
+	if schema == nil {
+		return
+	}
+
+	// 将 exclusiveMinimum 转换为 minimum（+1）
+	if exMin, ok := schema["exclusiveMinimum"].(float64); ok {
+		if _, hasMin := schema["minimum"]; !hasMin {
+			schema["minimum"] = exMin + 1
+		}
+		delete(schema, "exclusiveMinimum")
+	}
+
+	// 将 exclusiveMaximum 转换为 maximum（-1）
+	if exMax, ok := schema["exclusiveMaximum"].(float64); ok {
+		if _, hasMax := schema["maximum"]; !hasMax {
+			schema["maximum"] = exMax - 1
+		}
+		delete(schema, "exclusiveMaximum")
+	}
+
+	// 移除 Vertex AI 不支持的字段
+	unsupportedFields := []string{
+		"$schema",
+		"$ref",
+		"$id",
+		"$defs",
+		"definitions",
+		"minItems",
+		"maxItems",
+		"uniqueItems",
+		"pattern",
+		"additionalProperties",
+		"patternProperties",
+		"dependencies",
+		"if",
+		"then",
+		"else",
+		"allOf",
+		"anyOf",
+		"oneOf",
+		"not",
+		"contentMediaType",
+		"contentEncoding",
+		"examples",
+		"default",
+		"const",
+		"minLength",
+		"maxLength",
+		"format",
+	}
+	for _, field := range unsupportedFields {
+		delete(schema, field)
+	}
+
+	// 递归处理 properties
+	if props, ok := schema["properties"].(map[string]interface{}); ok {
+		for _, propValue := range props {
+			if propSchema, ok := propValue.(map[string]interface{}); ok {
+				cleanSchemaForVertexAI(propSchema)
+			}
+		}
+	}
+
+	// 递归处理 items（数组类型）
+	if items, ok := schema["items"].(map[string]interface{}); ok {
+		cleanSchemaForVertexAI(items)
+	}
+
+	// 递归处理 items 数组形式
+	if itemsArr, ok := schema["items"].([]interface{}); ok {
+		for _, item := range itemsArr {
+			if itemSchema, ok := item.(map[string]interface{}); ok {
+				cleanSchemaForVertexAI(itemSchema)
+			}
+		}
+	}
+}
+
+// deepCopyMap 深拷贝 map 以避免修改原始数据
+func deepCopyMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	result := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		switch val := v.(type) {
+		case map[string]interface{}:
+			result[k] = deepCopyMap(val)
+		case []interface{}:
+			result[k] = deepCopySlice(val)
+		default:
+			result[k] = v
+		}
+	}
+	return result
+}
+
+// deepCopySlice 深拷贝 slice
+func deepCopySlice(s []interface{}) []interface{} {
+	if s == nil {
+		return nil
+	}
+	result := make([]interface{}, len(s))
+	for i, v := range s {
+		switch val := v.(type) {
+		case map[string]interface{}:
+			result[i] = deepCopyMap(val)
+		case []interface{}:
+			result[i] = deepCopySlice(val)
+		default:
+			result[i] = v
+		}
 	}
 	return result
 }
@@ -316,6 +486,19 @@ func buildClaudeGenerationConfig(req *ClaudeMessagesRequest, modelName string) *
 		if strings.HasPrefix(modelName, "gemini-3-pro-") {
 			cfg.ThinkingConfig.ThinkingLevel = "high"
 			cfg.ThinkingConfig.ThinkingBudget = 0 // 使用 level 时清空 budget
+		}
+
+		// 确保 MaxOutputTokens > ThinkingBudget（Vertex AI 要求）
+		if cfg.ThinkingConfig.ThinkingBudget > 0 {
+			minDiff := 1024 // 最小差值，确保有足够的输出空间
+			if cfg.MaxOutputTokens <= cfg.ThinkingConfig.ThinkingBudget+minDiff {
+				// 减少 ThinkingBudget 以满足约束
+				cfg.ThinkingConfig.ThinkingBudget = cfg.MaxOutputTokens - minDiff
+				if cfg.ThinkingConfig.ThinkingBudget < 1024 {
+					cfg.ThinkingConfig.ThinkingBudget = 1024
+					cfg.MaxOutputTokens = 2048 // 确保最小可用配置
+				}
+			}
 		}
 	}
 

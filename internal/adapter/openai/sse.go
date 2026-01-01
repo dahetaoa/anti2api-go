@@ -322,6 +322,15 @@ func (sw *SSEWriter) writeToolCallsLocked(toolCalls []core.ToolCallInfo) error {
 	openaiCalls := make([]OpenAIToolCall, len(toolCalls))
 	for i, tc := range toolCalls {
 		argsJSON, _ := json.Marshal(tc.Args)
+		var extraContent *ExtraContent
+		if tc.ThoughtSignature != "" {
+			extraContent = &ExtraContent{
+				Google: &GoogleExtra{
+					ThoughtSignature: tc.ThoughtSignature,
+				},
+			}
+		}
+
 		openaiCalls[i] = OpenAIToolCall{
 			ID:   tc.ID,
 			Type: "function",
@@ -329,7 +338,7 @@ func (sw *SSEWriter) writeToolCallsLocked(toolCalls []core.ToolCallInfo) error {
 				Name:      tc.Name,
 				Arguments: string(argsJSON),
 			},
-			ThoughtSignature: tc.ThoughtSignature,
+			ExtraContent: extraContent,
 		}
 	}
 
@@ -425,15 +434,104 @@ func (sw *SSEWriter) WriteHeartbeat() error {
 }
 
 // GetMergedResponse 返回收集的原始 SSE 事件（用于透传日志记录）
+// 合并连续的 content 和 reasoning delta 事件以提高可读性
 func (sw *SSEWriter) GetMergedResponse() []interface{} {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	// 转换为 []interface{} 用于日志输出
-	result := make([]interface{}, len(sw.collectedEvents))
-	for i, event := range sw.collectedEvents {
-		result[i] = event
+	var result []interface{}
+	var pendingContent string
+	var pendingReasoning string
+
+	// 辅助函数：刷新待处理的合并内容
+	flushPending := func() {
+		if pendingReasoning != "" {
+			result = append(result, map[string]interface{}{
+				"id":      sw.id,
+				"object":  "chat.completion.chunk",
+				"created": sw.created,
+				"model":   sw.model,
+				"choices": []interface{}{
+					map[string]interface{}{
+						"index": 0,
+						"delta": map[string]interface{}{
+							"reasoning": pendingReasoning,
+						},
+					},
+				},
+			})
+			pendingReasoning = ""
+		}
+		if pendingContent != "" {
+			result = append(result, map[string]interface{}{
+				"id":      sw.id,
+				"object":  "chat.completion.chunk",
+				"created": sw.created,
+				"model":   sw.model,
+				"choices": []interface{}{
+					map[string]interface{}{
+						"index": 0,
+						"delta": map[string]interface{}{
+							"content": pendingContent,
+						},
+					},
+				},
+			})
+			pendingContent = ""
+		}
 	}
+
+	for _, event := range sw.collectedEvents {
+		// 检查是否是 chat.completion.chunk 事件
+		choices, ok := event["choices"].([]interface{})
+		if !ok || len(choices) == 0 {
+			flushPending()
+			result = append(result, event)
+			continue
+		}
+
+		choice, ok := choices[0].(map[string]interface{})
+		if !ok {
+			flushPending()
+			result = append(result, event)
+			continue
+		}
+
+		delta, ok := choice["delta"].(map[string]interface{})
+		if !ok {
+			flushPending()
+			result = append(result, event)
+			continue
+		}
+
+		// 检查是否有 content
+		if content, ok := delta["content"].(string); ok && content != "" {
+			if pendingReasoning != "" {
+				// 先刷新待处理的 reasoning
+				flushPending()
+			}
+			pendingContent += content
+			continue
+		}
+
+		// 检查是否有 reasoning
+		if reasoning, ok := delta["reasoning"].(string); ok && reasoning != "" {
+			if pendingContent != "" {
+				// 先刷新待处理的 content
+				flushPending()
+			}
+			pendingReasoning += reasoning
+			continue
+		}
+
+		// 其他事件（如 role、tool_calls、finish_reason 等）：先刷新待处理内容，再添加当前事件
+		flushPending()
+		result = append(result, event)
+	}
+
+	// 刷新最后的待处理内容
+	flushPending()
+
 	return result
 }
 

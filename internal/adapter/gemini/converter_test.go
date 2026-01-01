@@ -42,7 +42,7 @@ func TestSanitizeRequestContents(t *testing.T) {
 			},
 		},
 		{
-			name: "Tool Name Lookback and Signature Forwarding",
+			name: "Tool Name Lookback",
 			contents: []Content{
 				{
 					Role: "model",
@@ -50,7 +50,6 @@ func TestSanitizeRequestContents(t *testing.T) {
 						{
 							FunctionCall: &FunctionCall{ID: "call_1", Name: "get_weather"},
 						},
-						{ThoughtSignature: "sig_123"},
 					},
 				},
 				{
@@ -61,14 +60,6 @@ func TestSanitizeRequestContents(t *testing.T) {
 						},
 					},
 				},
-				{
-					Role: "user",
-					Parts: []Part{
-						{
-							FunctionCall: &FunctionCall{ID: "call_2", Name: "next_tool"}, // Missing Signature
-						},
-					},
-				},
 			},
 			verify: func(t *testing.T, result []Content) {
 				// Verify name lookback
@@ -76,9 +67,25 @@ func TestSanitizeRequestContents(t *testing.T) {
 				if resp.Name != "get_weather" {
 					t.Errorf("Expected name 'get_weather', got '%s'", resp.Name)
 				}
-				// Verify signature forwarding
-				if result[2].Parts[0].ThoughtSignature != "sig_123" {
-					t.Errorf("Expected signature 'sig_123', got '%s'", result[2].Parts[0].ThoughtSignature)
+			},
+		},
+		{
+			name: "Preserve ThoughtSignature Parts",
+			contents: []Content{
+				{
+					Role: "model",
+					Parts: []Part{
+						{ThoughtSignature: "sig_only"}, // Part with only signature
+					},
+				},
+			},
+			verify: func(t *testing.T, result []Content) {
+				// 确保只有签名的 Part 不会被删除
+				if len(result) != 1 || len(result[0].Parts) != 1 {
+					t.Fatalf("Expected 1 content with 1 part, got %d contents", len(result))
+				}
+				if result[0].Parts[0].ThoughtSignature != "sig_only" {
+					t.Errorf("Expected signature 'sig_only', got '%s'", result[0].Parts[0].ThoughtSignature)
 				}
 			},
 		},
@@ -119,5 +126,59 @@ func TestSanitizeCandidates(t *testing.T) {
 
 	if _, ok := part["thoughtSignature"]; !ok {
 		t.Error("Expected thoughtSignature to be preserved")
+	}
+}
+
+func TestBuildGeminiGenerationConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		model     string
+		reqConfig *GenerationConfig
+		verify    func(t *testing.T, result *GenerationConfig)
+	}{
+		{
+			name:  "Claude with thinking - auto add maxOutputTokens",
+			model: "claude-opus-4-5-thinking",
+			reqConfig: &GenerationConfig{
+				ThinkingConfig: &ThinkingConfig{IncludeThoughts: true, ThinkingBudget: 32000},
+			},
+			verify: func(t *testing.T, result *GenerationConfig) {
+				if result.MaxOutputTokens != 64000 {
+					t.Errorf("Expected MaxOutputTokens 64000, got %d", result.MaxOutputTokens)
+				}
+			},
+		},
+		{
+			name:  "Claude with thinking and low maxOutputTokens - auto increase",
+			model: "claude-opus-4-5-thinking",
+			reqConfig: &GenerationConfig{
+				MaxOutputTokens: 1000,
+				ThinkingConfig:  &ThinkingConfig{IncludeThoughts: true, ThinkingBudget: 32000},
+			},
+			verify: func(t *testing.T, result *GenerationConfig) {
+				if result.MaxOutputTokens <= 32000 {
+					t.Errorf("Expected MaxOutputTokens > 32000, got %d", result.MaxOutputTokens)
+				}
+			},
+		},
+		{
+			name:  "Gemini with thinking - auto add default maxOutputTokens",
+			model: "gemini-3-pro-high",
+			reqConfig: &GenerationConfig{
+				ThinkingConfig: &ThinkingConfig{IncludeThoughts: true},
+			},
+			verify: func(t *testing.T, result *GenerationConfig) {
+				if result.MaxOutputTokens != 8192 {
+					t.Errorf("Expected MaxOutputTokens 8192, got %d", result.MaxOutputTokens)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildGeminiGenerationConfig(tt.reqConfig, tt.model)
+			tt.verify(t, result)
+		})
 	}
 }

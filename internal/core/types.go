@@ -143,3 +143,79 @@ type Usage struct {
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 }
+
+// MergeParts 合并连续的 text 和 thought parts 以提高日志可读性
+// 合并规则：
+// - 连续的 text parts (Thought=false) 合并为一个
+// - 连续的 thought parts (Thought=true) 合并为一个
+// - 其他类型（FunctionCall、ThoughtSignature only 等）保持不变
+func MergeParts(parts []Part) []Part {
+	if len(parts) == 0 {
+		return parts
+	}
+
+	var result []Part
+	var pendingText string
+	var pendingThought string
+	var pendingThoughtSignature string
+
+	flushPending := func() {
+		if pendingThought != "" {
+			p := Part{Text: pendingThought, Thought: true}
+			if pendingThoughtSignature != "" {
+				p.ThoughtSignature = pendingThoughtSignature
+				pendingThoughtSignature = ""
+			}
+			result = append(result, p)
+			pendingThought = ""
+		}
+		if pendingText != "" {
+			result = append(result, Part{Text: pendingText})
+			pendingText = ""
+		}
+	}
+
+	for _, part := range parts {
+		// 处理 ThoughtSignature（可能单独出现或与 thought 一起）
+		if part.ThoughtSignature != "" && part.Text == "" && !part.Thought && part.FunctionCall == nil {
+			// 单独的 signature part，保存以附加到前一个 thought
+			pendingThoughtSignature = part.ThoughtSignature
+			continue
+		}
+
+		if part.Thought && part.Text != "" {
+			// thought part
+			if pendingText != "" {
+				flushPending()
+			}
+			pendingThought += part.Text
+			if part.ThoughtSignature != "" {
+				pendingThoughtSignature = part.ThoughtSignature
+			}
+		} else if part.Text != "" && !part.Thought {
+			// normal text part
+			if pendingThought != "" {
+				flushPending()
+			}
+			pendingText += part.Text
+		} else if part.FunctionCall != nil {
+			// function call, flush and append
+			flushPending()
+			result = append(result, part)
+		} else if part.FunctionResponse != nil || part.InlineData != nil {
+			// other non-text parts
+			flushPending()
+			result = append(result, part)
+		}
+		// 空 part 跳过
+	}
+
+	flushPending()
+
+	// 如果有遗留的 signature，附加为单独的 part
+	if pendingThoughtSignature != "" {
+		result = append(result, Part{ThoughtSignature: pendingThoughtSignature})
+	}
+
+	return result
+}

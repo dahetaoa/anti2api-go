@@ -140,10 +140,20 @@ type OpenAIFunction struct {
 
 // OpenAIToolCall OpenAI 工具调用
 type OpenAIToolCall struct {
-	ID               string             `json:"id"`
-	Type             string             `json:"type"`
-	Function         OpenAIFunctionCall `json:"function"`
-	ThoughtSignature string             `json:"thought_signature,omitempty"`
+	ID           string             `json:"id"`
+	Type         string             `json:"type"`
+	Function     OpenAIFunctionCall `json:"function"`
+	ExtraContent *ExtraContent      `json:"extra_content,omitempty"`
+}
+
+// ExtraContent OpenAI 扩展内容（Google Gemini 特有）
+type ExtraContent struct {
+	Google *GoogleExtra `json:"google,omitempty"`
+}
+
+// GoogleExtra Google 扩展字段
+type GoogleExtra struct {
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 // OpenAIFunctionCall OpenAI 函数调用

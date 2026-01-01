@@ -246,10 +246,25 @@ func handleGeminiStreamGenerateContent(w http.ResponseWriter, r *http.Request, m
 	}
 	rawResp.Response.UsageMetadata = usage
 
-	// 记录流式响应日志（原始 Vertex 格式）
-	logger.BackendStreamResponse(http.StatusOK, duration, rawResp)
+	// 构建合并后的响应用于日志（提高可读性）
+	mergedParts := core.MergeParts(allParts)
+	mergedResp := &core.AntigravityResponse{}
+	mergedResp.Response.Candidates = []core.Candidate{
+		{
+			Content: core.Content{
+				Role:  "model",
+				Parts: mergedParts,
+			},
+			FinishReason: finishReason,
+		},
+	}
+	mergedResp.Response.UsageMetadata = usage
+
+	// 记录流式响应日志（合并后格式）
+	logger.BackendStreamResponse(http.StatusOK, duration, mergedResp)
+
 	// Gemini API 客户端响应格式与 Vertex 类似
-	geminiResp := gemini.ExtractGeminiResponse(rawResp)
+	geminiResp := gemini.ExtractGeminiResponse(mergedResp)
 	logger.ClientStreamResponse(http.StatusOK, duration, geminiResp)
 }
 
@@ -418,8 +433,23 @@ func handleRawGeminiStreamGenerateContent(w http.ResponseWriter, r *http.Request
 	}
 	rawResp.Response.UsageMetadata = usage
 
-	// 记录流式响应日志（原始 Vertex 格式）
-	logger.BackendStreamResponse(http.StatusOK, duration, rawResp)
-	// 原始 Gemini 透传，客户端响应与后端相同
-	logger.ClientStreamResponse(http.StatusOK, duration, rawResp)
+	// 构建合并后的响应用于日志（提高可读性）
+	mergedParts := core.MergeParts(allParts)
+	mergedResp := &core.AntigravityResponse{}
+	mergedResp.Response.Candidates = []core.Candidate{
+		{
+			Content: core.Content{
+				Role:  "model",
+				Parts: mergedParts,
+			},
+			FinishReason: finishReason,
+		},
+	}
+	mergedResp.Response.UsageMetadata = usage
+
+	// 记录流式响应日志（合并后格式）
+	logger.BackendStreamResponse(http.StatusOK, duration, mergedResp)
+
+	// 原始 Gemini 透传，客户端响应使用合并后的格式
+	logger.ClientStreamResponse(http.StatusOK, duration, mergedResp)
 }
